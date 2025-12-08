@@ -13,6 +13,9 @@ from .plot_data import (
     MultigroupXSPlotData,
     MultigroupUncertaintyPlotData,
     UncertaintyBand,
+    HeatmapPlotData,
+    CovarianceHeatmapData,
+    MF34HeatmapData,
 )
 from .plot_builder import PlotBuilder
 
@@ -24,5 +27,8 @@ __all__ = [
     'MultigroupXSPlotData',
     'MultigroupUncertaintyPlotData',
     'UncertaintyBand',
+    'HeatmapPlotData',
+    'CovarianceHeatmapData',
+    'MF34HeatmapData',
     'PlotBuilder',
 ]

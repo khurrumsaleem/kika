@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import pandas as pd
-from kika.mctal.parse_mctal import read_mctal
+from kika.mcnp.parse_mctal import read_mctal
 
 def test_mctal_parsing():
     

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Test script for new __str__ and __repr__ methods"""
 
-from mcnpy.input.material import Material, MaterialCollection
+from mcnpy.mcnp.material import Material, MaterialCollection
 
 print("="*80)
 print("Testing Material.__str__ and Material.__repr__")

@@ -12,7 +12,8 @@ from kika.plotting import (
     PlotData,
     LegendreCoeffPlotData,
     LegendreUncertaintyPlotData,
-    PlotBuilder
+    PlotBuilder,
+    CovarianceHeatmapData,
 )
 
 
@@ -279,6 +280,57 @@ class TestPlotBuilder:
         
         assert len(ax.lines) == 1
         
+        plt.close(fig)
+
+    def test_heatmap_limits_follow_energy_units(self):
+        """Ensure set_limits works for heatmaps by converting energy ranges to axis coords."""
+        energy_edges = np.array([1e-3, 1e-2, 1e-1, 1.0])
+        matrix = np.arange(9, dtype=float).reshape(3, 3)
+
+        edges_tx = np.log10(np.maximum(energy_edges, 1e-300))
+        x_edges = edges_tx - edges_tx[0]
+
+        block_info = {
+            "mts": [2],
+            "G": len(energy_edges) - 1,
+            "ranges": [(x_edges[0], x_edges[-1])],
+            "energy_ranges": {2: (x_edges[0], x_edges[-1])},
+        }
+
+        heatmap_data = CovarianceHeatmapData(
+            matrix_data=matrix,
+            matrix_type="corr",
+            block_info=block_info,
+            energy_grid=energy_edges,
+            show_energy_ticks=False,
+            mt_labels=["2"],
+            is_diagonal=True,
+            scale="log",
+            x_edges=x_edges,
+            y_edges=x_edges.copy(),
+        )
+
+        fig = (
+            PlotBuilder()
+            .add_heatmap(heatmap_data, show_uncertainties=False)
+            .set_limits(x_lim=(1e-2, 1e-1))
+            .build()
+        )
+
+        heatmap_ax = fig.axes[0]
+
+        expected = (
+            np.log10(1e-2) - np.log10(energy_edges[0]),
+            np.log10(1e-1) - np.log10(energy_edges[0]),
+        )
+
+        x_lim = heatmap_ax.get_xlim()
+        y_lim = heatmap_ax.get_ylim()
+
+        assert x_lim == pytest.approx(expected)
+        # y-axis is inverted after plotting; compare irrespective of ordering
+        assert tuple(sorted(y_lim)) == pytest.approx(tuple(sorted(expected)))
+
         plt.close(fig)
 
 

@@ -437,3 +437,228 @@ class MultigroupUncertaintyPlotData(PlotData):
             self.label = f"{isotope_symbol} MT={self.mt}"
         elif self.label is None and self.mt is not None:
             self.label = f"MT={self.mt}"
+
+
+@dataclass
+class HeatmapPlotData:
+    """
+    Base class for 2D heatmap data.
+    
+    This encapsulates data for heatmap/image plots including matrix data,
+    colormap configuration, and colorbar settings.
+    
+    Attributes
+    ----------
+    matrix_data : np.ndarray
+        2D matrix to display
+    extent : tuple of float, optional
+        (xmin, xmax, ymin, ymax) for imshow extent parameter
+    x_edges : np.ndarray, optional
+        Bin edges for x-axis (for pcolormesh, preferred over imshow)
+    y_edges : np.ndarray, optional
+        Bin edges for y-axis (for pcolormesh)
+    cmap : str or colormap
+        Colormap name or instance
+    vmin : float, optional
+        Minimum value for color scale
+    vmax : float, optional
+        Maximum value for color scale
+    norm : matplotlib.colors.Normalize, optional
+        Custom normalization (e.g., TwoSlopeNorm for diverging colormaps)
+    colorbar_label : str, optional
+        Label for the colorbar
+    colorbar_position : str
+        Position for colorbar: 'right', 'bottom', 'top', 'left'
+    mask_value : float, optional
+        Value to mask (e.g., 0.0 for correlation matrices)
+    mask_color : str
+        Color for masked regions
+    label : str, optional
+        Label for plot identification
+    metadata : dict
+        Additional metadata
+    """
+    matrix_data: np.ndarray
+    extent: Optional[Tuple[float, float, float, float]] = None
+    x_edges: Optional[np.ndarray] = None
+    y_edges: Optional[np.ndarray] = None
+    cmap: Union[str, Any] = "viridis"
+    vmin: Optional[float] = None
+    vmax: Optional[float] = None
+    norm: Optional[Any] = None
+    colorbar_label: Optional[str] = None
+    colorbar_position: str = "right"
+    mask_value: Optional[float] = None
+    mask_color: str = "#F0F0F0"
+    label: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        """Validate heatmap data."""
+        self.matrix_data = np.asarray(self.matrix_data)
+        if self.matrix_data.ndim != 2:
+            raise ValueError(f"matrix_data must be 2D array, got shape {self.matrix_data.shape}")
+        
+        if self.x_edges is not None:
+            self.x_edges = np.asarray(self.x_edges)
+        if self.y_edges is not None:
+            self.y_edges = np.asarray(self.y_edges)
+    
+    def get_masked_data(self) -> np.ndarray:
+        """
+        Get masked array with mask_value applied.
+        
+        Returns
+        -------
+        np.ma.MaskedArray
+            Masked version of data
+        """
+        if self.mask_value is not None:
+            return np.ma.masked_where(self.matrix_data == self.mask_value, self.matrix_data)
+        return self.matrix_data
+
+
+@dataclass
+class CovarianceHeatmapData(HeatmapPlotData):
+    """
+    Covariance/correlation matrix heatmap data.
+    
+    Additional Attributes
+    ---------------------
+    matrix_type : str
+        'cov' or 'corr'
+    zaid : int, optional
+        Isotope identifier (ZAID)
+    block_info : dict, optional
+        Information about matrix block structure:
+        - 'mts': list of MT numbers
+        - 'G': number of energy groups per MT
+        - 'ranges': list of (start, end) indices for each MT block
+    uncertainty_data : dict, optional
+        Uncertainty values for optional panels above heatmap
+        Format: {mt: sigma_percent_array} where sigma_percent_array has length G
+    energy_grid : np.ndarray, optional
+        Energy bin boundaries (length G+1)
+    show_energy_ticks : bool
+        Whether to show energy group tick marks and labels
+    mt_labels : list of str, optional
+        Custom labels for MT reactions (defaults to "MT {number}")
+    is_diagonal : bool
+        Whether this represents diagonal blocks (vs off-diagonal)
+    """
+    matrix_type: str = "corr"
+    zaid: Optional[int] = None
+    block_info: Optional[Dict[str, Any]] = None
+    uncertainty_data: Optional[Dict[int, np.ndarray]] = None
+    energy_grid: Optional[np.ndarray] = None
+    show_energy_ticks: bool = True
+    mt_labels: Optional[List[str]] = None
+    is_diagonal: bool = True
+    scale: str = "log"
+    
+    def __post_init__(self):
+        super().__post_init__()
+        
+        # Auto-configure for correlation matrices with diverging colormap
+        if self.matrix_type == "corr" and self.norm is None:
+            from matplotlib.colors import TwoSlopeNorm
+            # Calculate symmetric color limits around 0
+            absmax = np.nanmax(np.abs(self.matrix_data))
+            if absmax < 1e-10:
+                absmax = 1.0  # Avoid division by zero
+            self.norm = TwoSlopeNorm(vmin=-absmax, vcenter=0.0, vmax=absmax)
+        
+        if self.matrix_type == "corr" and isinstance(self.cmap, str) and self.cmap == "viridis":
+            self.cmap = "RdYlGn"  # Diverging colormap for correlations
+        
+        # Auto-generate colorbar label if not provided
+        if self.colorbar_label is None:
+            self.colorbar_label = "Correlation" if self.matrix_type == "corr" else "Covariance"
+        
+        # Store metadata
+        self.metadata['matrix_type'] = self.matrix_type
+        self.metadata['zaid'] = self.zaid
+        self.metadata['is_diagonal'] = self.is_diagonal
+        self.metadata['scale'] = self.scale
+        
+        # Convert energy_grid if provided
+        if self.energy_grid is not None:
+            self.energy_grid = np.asarray(self.energy_grid)
+
+
+@dataclass
+class MF34HeatmapData(HeatmapPlotData):
+    """
+    Angular distribution (MF34) covariance heatmap data.
+    
+    These heatmaps can be more complex because different Legendre coefficients
+    may have different energy group structures.
+    
+    Additional Attributes
+    ---------------------
+    isotope : int
+        Isotope identifier (ZAID)
+    mt : int
+        MT reaction number
+    legendre_coeffs : list of int
+        Legendre polynomial orders included
+    matrix_type : str
+        'cov' or 'corr'
+    scale : str
+        Energy axis scale: 'log' or 'linear'
+    block_info : dict, optional
+        Per-Legendre block structure information:
+        - 'legendre_coeffs': list of L values
+        - 'G_per_L': dict {L: G_L} of energy groups per L
+        - 'ranges': dict {L: (start, end)} of index ranges
+    uncertainty_data : dict, optional
+        Uncertainty values for optional panels
+        Format: {L: sigma_percent_array[G_L]}
+    energy_grids : dict, optional
+        Energy bin boundaries per Legendre coefficient
+        Format: {L: energy_grid[G_L+1]}
+    show_energy_ticks : bool
+        Whether to show energy ticks with proper scaling
+    is_diagonal : bool
+        Whether diagonal blocks (L vs L) or off-diagonal (L1 vs L2)
+    """
+    isotope: int = 0
+    mt: int = 0
+    legendre_coeffs: List[int] = field(default_factory=list)
+    matrix_type: str = "corr"
+    scale: str = "log"
+    block_info: Optional[Dict[str, Any]] = None
+    uncertainty_data: Optional[Dict[int, np.ndarray]] = None
+    energy_grids: Optional[Dict[int, np.ndarray]] = None
+    show_energy_ticks: bool = True
+    is_diagonal: bool = True
+    
+    def __post_init__(self):
+        super().__post_init__()
+        
+        # Auto-configure for correlation matrices
+        if self.matrix_type == "corr" and self.norm is None:
+            from matplotlib.colors import TwoSlopeNorm
+            absmax = np.nanmax(np.abs(self.matrix_data))
+            if absmax < 1e-10:
+                absmax = 1.0
+            self.norm = TwoSlopeNorm(vmin=-absmax, vcenter=0.0, vmax=absmax)
+        
+        if self.matrix_type == "corr" and isinstance(self.cmap, str) and self.cmap == "viridis":
+            self.cmap = "RdYlGn"
+        
+        # Auto-generate colorbar label
+        if self.colorbar_label is None:
+            self.colorbar_label = "Correlation" if self.matrix_type == "corr" else "Covariance"
+        
+        # Store metadata
+        self.metadata['isotope'] = self.isotope
+        self.metadata['mt'] = self.mt
+        self.metadata['legendre_coeffs'] = self.legendre_coeffs
+        self.metadata['matrix_type'] = self.matrix_type
+        self.metadata['scale'] = self.scale
+        self.metadata['is_diagonal'] = self.is_diagonal
+        
+        # Convert energy_grids if provided
+        if self.energy_grids is not None:
+            self.energy_grids = {L: np.asarray(grid) for L, grid in self.energy_grids.items()}

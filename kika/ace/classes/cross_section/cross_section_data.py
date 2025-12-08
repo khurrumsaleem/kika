@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Union
 from kika.ace.classes.xss import XssEntry
 from kika.ace.classes.cross_section.cross_section_repr import reaction_xs_repr, xs_data_repr
+from kika._constants import MT_GROUPS
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -180,6 +181,84 @@ class CrossSectionData:
         """Get a list of available MT numbers in ascending order."""
         return sorted(self.reaction.keys())
     
+    def _get_or_compute_reaction(self, mt: int) -> Optional[ReactionCrossSection]:
+        """
+        Get a reaction by MT number, computing it from grouped reactions if necessary.
+        
+        If the requested MT is in MT_GROUPS and not directly available, this method
+        will compute it by summing the cross sections of all component reactions.
+        
+        Parameters
+        ----------
+        mt : int
+            MT reaction number
+            
+        Returns
+        -------
+        ReactionCrossSection or None
+            The reaction data, either direct or computed, or None if unavailable
+        """
+        # If we have it directly, return it
+        if mt in self.reaction:
+            return self.reaction[mt]
+        
+        # Check if this is a grouped MT that we need to compute
+        for grouped_mt, mt_range in MT_GROUPS:
+            if mt == grouped_mt:
+                # Find all component MTs that exist in our data
+                component_mts = [comp_mt for comp_mt in mt_range if comp_mt in self.reaction]
+                
+                if not component_mts:
+                    # No component reactions available
+                    return None
+                
+                # Get the first component to use as a template
+                first_reaction = self.reaction[component_mts[0]]
+                
+                # All components should have the same energy grid
+                # We'll use the energy grid from the first component
+                energy_entries = first_reaction._energy_entries
+                num_energies = len(energy_entries)
+                
+                # Initialize sum array
+                xs_sum = np.zeros(num_energies)
+                
+                # Sum all component cross sections
+                for comp_mt in component_mts:
+                    comp_reaction = self.reaction[comp_mt]
+                    # Ensure same length
+                    comp_xs = comp_reaction.xs_values
+                    if len(comp_xs) == num_energies:
+                        xs_sum += np.array(comp_xs)
+                    else:
+                        # Handle different lengths by taking minimum
+                        min_len = min(len(comp_xs), num_energies)
+                        xs_sum[:min_len] += np.array(comp_xs[:min_len])
+                
+                # Create XssEntry objects for the summed cross sections
+                # We'll create mock XssEntry objects with the summed values
+                xs_entries = []
+                for i, xs_val in enumerate(xs_sum):
+                    # Create a simple object that has a 'value' attribute
+                    class XssValue:
+                        def __init__(self, val):
+                            self.value = val
+                    xs_entries.append(XssValue(xs_val))
+                
+                # Create and return the aggregated reaction
+                aggregated_reaction = ReactionCrossSection(
+                    mt=mt,
+                    energy_idx=first_reaction.energy_idx,
+                    num_energies=num_energies,
+                    _xs_entries=xs_entries,
+                    _energy_entries=energy_entries
+                )
+                
+                return aggregated_reaction
+        
+        # MT not found and not a grouped MT
+        return None
+    
     def plot(self, mt: Union[int, List[int]], ax=None, **kwargs):
         """
         Plot cross section for one or more reactions.
@@ -213,7 +292,7 @@ class CrossSectionData:
         
         # Plot each requested MT
         for mt_num in mt_list:
-            reaction = self.reaction.get(mt_num)
+            reaction = self._get_or_compute_reaction(mt_num)
             if reaction and reaction._xs_entries and reaction._energy_entries:
                 # Get data for this reaction
                 energies = reaction.energies
@@ -270,10 +349,10 @@ class CrossSectionData:
         
         # Add columns for each MT number, but only if they exist in our data
         for mt in mt_list:
-            # Verify this MT exists in our data
-            if mt in self.reaction:
-                reaction = self.reaction[mt]
-                
+            # Get reaction (computed if necessary)
+            reaction = self._get_or_compute_reaction(mt)
+            
+            if reaction is not None:
                 if reaction._xs_entries:
                     # Create array of zeros for the full energy grid
                     xs_values = np.zeros(len(energy_values))
@@ -294,7 +373,7 @@ class CrossSectionData:
                     # If reaction has no values, fill with zeros
                     result[f"MT={mt}"] = np.zeros(len(energy_values))
             else:
-                # Skip MTs that don't exist in our data
+                # Skip MTs that don't exist and can't be computed
                 continue
         
         return pd.DataFrame(result)
@@ -345,11 +424,16 @@ class CrossSectionData:
         if not self.has_data:
             raise ValueError("No cross section data available")
         
-        if mt not in self.reaction:
+        reaction = self._get_or_compute_reaction(mt)
+        if reaction is None:
             available_mts = self.mt_numbers
-            raise ValueError(f"MT={mt} not found. Available MT numbers: {available_mts}")
-        
-        reaction = self.reaction[mt]
+            # Check if it's a grouped MT
+            grouped_info = ""
+            for grouped_mt, mt_range in MT_GROUPS:
+                if mt == grouped_mt:
+                    grouped_info = f" (grouped MT from range {list(mt_range)[0]}-{list(mt_range)[-1]})"
+                    break
+            raise ValueError(f"MT={mt} not found{grouped_info}. Available MT numbers: {available_mts}")
         energies = reaction.energies  # In MeV
         xs_values = reaction.xs_values  # In barns
         

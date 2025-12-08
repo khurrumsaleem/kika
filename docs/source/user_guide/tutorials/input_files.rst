@@ -110,7 +110,7 @@ into their constituent isotopes based on natural abundances:
 .. code-block:: python
 
    # Create a material with natural elements
-   natural_mat = kika.input.material.Mat(id=200, nlib="80c")
+   natural_mat = kika.mcnp.material.Mat(id=200, nlib="80c")
    
    # Add natural carbon (ZAID 6000)
    natural_mat.add_nuclide(zaid=6000, fraction=0.5)
@@ -128,7 +128,7 @@ into their constituent isotopes based on natural abundances:
    print(natural_mat)
    
    # You can also convert only specific natural elements:
-   another_mat = kika.input.material.Mat(id=300, nlib="80c")
+   another_mat = kika.mcnp.material.Mat(id=300, nlib="80c")
    another_mat.add_nuclide(zaid=6000, fraction=0.3)  # Natural carbon
    another_mat.add_nuclide(zaid=8000, fraction=0.7)  # Natural oxygen
    
@@ -145,7 +145,7 @@ You can create new materials from scratch using the KIKA API:
 
 .. code-block:: python
 
-   from kika.input.material import Mat, Materials
+   from kika.mcnp.material import Mat, Materials
    
    # Create a new material - water (H2O)
    water = Mat(id=100, nlib="80c")
@@ -177,7 +177,7 @@ You can also modify input files programmatically:
    input_file.surfaces[10].params[0] = 1.5
    
    # Add a nuclide to a material
-   from kika.input.material import Nuclide
+   from kika.mcnp.material import Nuclide
    materials.mat[100].add_nuclide(zaid=1001, fraction=2.0)
    
    # TODO: Write the modified input to a new file
@@ -216,7 +216,7 @@ KIKA can help generate perturbation cards for sensitivity studies:
 
 .. code-block:: python
 
-   from kika.input.pert_generator import generate_material_perturbations
+   from kika.mcnp.pert_generator import generate_material_perturbations
    
    perturbations = generate_material_perturbations(
        material_id=300,

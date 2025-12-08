@@ -1,12 +1,19 @@
-from typing import List, Dict, Optional, Set, Tuple, Any, Union, Sequence
 from collections import defaultdict
 from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union, TYPE_CHECKING
+import copy
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import copy
+
 from kika._constants import MT_TO_REACTION
 from kika._utils import create_repr_section
+
+if TYPE_CHECKING:
+    from pathlib import Path
+    from kika.plotting.plot_data import CovarianceHeatmapData, MultigroupXSPlotData, MultigroupUncertaintyPlotData
+
 
 @dataclass
 class CovMat:
@@ -45,7 +52,14 @@ class CovMat:
     # ------------------------------------------------------------------
 
     def copy(self) -> "CovMat":
-        """Return a deep copy of this CovMat."""
+        """
+        Return a deep copy of this CovMat instance.
+        
+        Returns
+        -------
+        CovMat
+            Deep copy of the current covariance matrix object
+        """
         return copy.deepcopy(self)
 
     def add_matrix(
@@ -81,6 +95,41 @@ class CovMat:
         self.isotope_cols.append(isotope_col)
         self.reaction_cols.append(reaction_col)
         self.matrices.append(matrix)
+    
+    @classmethod
+    def from_gendf(cls, file_path: Union[str, 'Path']) -> "CovMat":
+        """
+        Create a CovMat instance from an NJOY-generated GENDF covariance file.
+        
+        This is a convenience class method that wraps the `read_njoy_covmat` function
+        to provide a more object-oriented API consistent with other data classes.
+        
+        Parameters
+        ----------
+        file_path : str or Path
+            Path to the GENDF covariance file
+            
+        Returns
+        -------
+        CovMat
+            CovMat instance loaded from the file
+            
+        Examples
+        --------
+        >>> covmat = CovMat.from_gendf('path/to/file.gendf')
+        >>> print(f"Loaded {covmat.num_matrices} matrices")
+        
+        See Also
+        --------
+        read_njoy_covmat : Underlying function that performs the parsing
+        """
+        from pathlib import Path
+        from kika.cov.parse_covmat import read_njoy_covmat
+        
+        # Convert to Path object for consistent handling
+        file_path = Path(file_path)
+        
+        return read_njoy_covmat(file_path)
     
     def remove_matrix(
         self,
@@ -196,6 +245,16 @@ class CovMat:
 
     @property
     def log_covariance_matrix(self) -> np.ndarray:
+        """
+        Return the log-space covariance matrix.
+        
+        Converts relative covariance to log-space using log1p transformation.
+        
+        Returns
+        -------
+        np.ndarray
+            Log-space covariance matrix
+        """
         cov_rel = self.covariance_matrix
         Sigma_log = np.log1p(cov_rel)
         return Sigma_log
@@ -238,13 +297,32 @@ class CovMat:
 
     @property
     def correlation_matrix(self) -> np.ndarray:
-        """ Unclipped: diag forced to 1, undefined→nan, no off-diag correction. """
+        """
+        Return the correlation matrix (unclipped).
+        
+        Diagonal elements are forced to 1.0, undefined entries become NaN.
+        No off-diagonal correction is applied.
+        
+        Returns
+        -------
+        np.ndarray
+            Correlation matrix with no clipping applied
+        """
         from kika.cov.decomposition import compute_correlation
         return compute_correlation(self, clip=False, force_diagonal=True)
 
     @property
     def clipped_correlation_matrix(self) -> np.ndarray:
-        """ Clipped into [-1,1], diag forced to 1, undefined→nan. """
+        """
+        Return the correlation matrix clipped to [-1, 1] range.
+        
+        Diagonal elements are forced to 1.0, undefined entries become NaN.
+        
+        Returns
+        -------
+        np.ndarray
+            Correlation matrix with values clipped to valid range [-1, 1]
+        """
         from kika.cov.decomposition import compute_correlation
         return compute_correlation(self, clip=True, force_diagonal=True)
 
@@ -745,7 +823,7 @@ class CovMat:
     
     def plot_uncertainties(
         self,
-        zaid: Union[int, Sequence[int]],
+        nuclide: Union[int, str, Sequence[Union[int, str]]],
         mt:   Union[int, Sequence[int]],
         ax: plt.Axes = None,
         *,
@@ -755,22 +833,32 @@ class CovMat:
         dpi: int = 300,
         font_family: str = 'serif',
         legend_loc: str = 'best',
+        xscale: str = 'log',
+        yscale: str = 'linear',
+        title: Optional[str] = 'default',
         **step_kwargs
-    ) -> plt.Axes:
-        """Delegate to the standalone plotting function without causing circular imports."""
-        from kika.cov.plotting import plot_uncertainties as _plot_uncertainties
+    ) -> plt.Figure:
+        """
+        Plot relative uncertainties for one or more (ZAID, MT) pairs.
+        
+        This method now uses the modern PlotBuilder-based implementation from
+        kika.plotting.covariance for cleaner, more maintainable code.
+        """
+        from kika.plotting.covariance import plot_uncertainties as _plot_uncertainties
 
         return _plot_uncertainties(
             covmat=self,
-            zaid=zaid,
+            nuclide=nuclide,
             mt=mt,
-            ax=ax,
             energy_range=energy_range,
             style=style,
             figsize=figsize,
             dpi=dpi,
             font_family=font_family,
             legend_loc=legend_loc,
+            xscale=xscale,
+            yscale=yscale,
+            title=title,
             **step_kwargs,
         )
     
@@ -915,7 +1003,7 @@ class CovMat:
     
     def plot_multigroup_xs(
         self,
-        zaid: Union[int, Sequence[int]],
+        nuclide: Union[int, str, Sequence[Union[int, str]]],
         mt: Union[int, Sequence[int]],
         ax: plt.Axes = None,
         *,
@@ -927,16 +1015,23 @@ class CovMat:
         dpi: int = 300,
         font_family: str = 'serif',
         legend_loc: str = 'best',
+        xscale: str = 'log',
+        yscale: str = 'linear',
+        title: Optional[str] = 'default',
         **step_kwargs
-    ) -> plt.Axes:
-        """Delegate to the standalone plotting function without causing circular imports."""
-        from kika.cov.plotting import plot_multigroup_xs as _plot_multigroup_xs
+    ) -> plt.Figure:
+        """
+        Plot multigroup cross sections with optional uncertainty bands.
+        
+        This method now uses the modern PlotBuilder-based implementation from
+        kika.plotting.covariance for cleaner, more maintainable code.
+        """
+        from kika.plotting.covariance import plot_multigroup_xs as _plot_multigroup_xs
 
         return _plot_multigroup_xs(
             covmat=self,
-            zaid=zaid,
+            nuclide=nuclide,
             mt=mt,
-            ax=ax,
             energy_range=energy_range,
             show_uncertainties=show_uncertainties,
             sigma=sigma,
@@ -945,16 +1040,307 @@ class CovMat:
             dpi=dpi,
             font_family=font_family,
             legend_loc=legend_loc,
+            xscale=xscale,
+            yscale=yscale,
+            title=title,
             **step_kwargs,
         )
     
+    def to_heatmap_data(
+        self,
+        nuclide: Union[int, str],
+        mt: Union[int, Sequence[int], Tuple[int, int]],
+        *,
+        matrix_type: str = 'corr',
+        show_energy_ticks: bool = True,
+        scale: str = 'log',
+        energy_range: Optional[Tuple[float, float]] = None,
+        **kwargs
+    ) -> 'CovarianceHeatmapData':
+        """
+        Prepare covariance heatmap data for PlotBuilder rendering.
+        
+        This method extracts the relevant matrix data, computes uncertainties,
+        and packages everything into a CovarianceHeatmapData object that can
+        be rendered by PlotBuilder.add_heatmap().
+        
+        Parameters
+        ----------
+        nuclide : int or str
+            Isotope identifier. Can be either:
+            - Integer ZAID (e.g., 92235 for U-235)
+            - Element-mass string (e.g., 'U235', 'Fe56')
+        mt : int, sequence of int, or tuple of (row_mt, col_mt)
+            MT reaction number(s). Can be:
+            - Single int: diagonal block for that MT
+            - Sequence of ints: diagonal blocks for those MTs  
+            - Tuple of (row_mt, col_mt): off-diagonal block between row and column MT
+        matrix_type : str, default 'corr'
+            Type of matrix: 'corr'/'correlation' for correlation matrix,
+            or 'cov'/'covariance' for covariance matrix
+        show_energy_ticks : bool, default True
+            Whether to enable energy group tick marks
+        scale : str, default 'log'
+            Energy axis scale: 'log'/'logarithmic' or 'lin'/'linear'
+        energy_range : tuple of float, optional
+            Energy window (emin, emax). Only bins overlapping the window are kept.
+        **kwargs
+            Additional parameters (reserved for future use)
+            
+        Returns
+        -------
+        CovarianceHeatmapData
+            Heatmap data object ready for PlotBuilder.add_heatmap()
+            
+        Examples
+        --------
+        >>> # Simple usage with PlotBuilder
+        >>> from kika.plotting import PlotBuilder
+        >>> heatmap_data = covmat.to_heatmap_data(nuclide=92235, mt=[2, 18, 102])
+        >>> fig = PlotBuilder(style='light').add_heatmap(heatmap_data)
+        >>> fig.show()
+        
+        >>> # Can also use string symbols
+        >>> heatmap_data = covmat.to_heatmap_data(nuclide='U235', mt=2, matrix_type='cov')
+        """
+        from kika.plotting.plot_data import CovarianceHeatmapData
+        from kika._utils import symbol_to_zaid
+        
+        # Convert nuclide to ZAID if string
+        if isinstance(nuclide, str):
+            zaid = symbol_to_zaid(nuclide)
+        else:
+            zaid = nuclide
+        
+        # Normalize matrix_type parameter
+        matrix_type_normalized = matrix_type.lower()
+        if matrix_type_normalized in ("corr", "correlation"):
+            matrix_type_normalized = "corr"
+        elif matrix_type_normalized in ("cov", "covariance"):
+            matrix_type_normalized = "cov"
+        else:
+            raise ValueError(
+                f"matrix_type must be 'corr'/'correlation' or 'cov'/'covariance', got '{matrix_type}'"
+            )
+        
+        # Normalize scale parameter
+        scale_normalized = scale.lower()
+        if scale_normalized in ("log", "logarithmic"):
+            scale_normalized = "log"
+        elif scale_normalized in ("lin", "linear"):
+            scale_normalized = "linear"
+        else:
+            raise ValueError(
+                f"scale must be 'log'/'logarithmic' or 'lin'/'linear', got '{scale}'"
+            )
+
+        def _transform_edges(edges: np.ndarray) -> np.ndarray:
+            if scale_normalized == "log":
+                safe = np.maximum(edges, 1e-300)
+                return np.log10(safe.astype(float))
+            return edges.astype(float)
+
+        def _crop_edges(edges: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+            """Return cropped edges and keep_idx mask (bin indices kept)."""
+            if energy_range is None:
+                keep_mask = np.ones(len(edges) - 1, dtype=bool)
+                return edges, keep_mask
+            emin, emax = energy_range
+            if not (np.isfinite(emin) and np.isfinite(emax)) or emin >= emax:
+                raise ValueError("energy_range must be a tuple (emin, emax) with emin < emax.")
+            keep_mask = (edges[1:] > float(emin)) & (edges[:-1] < float(emax))
+            if not np.any(keep_mask):
+                raise ValueError("energy_range removed all groups; nothing to plot.")
+            first, last = np.where(keep_mask)[0][[0, -1]]
+            cropped = edges[first:last + 2]
+            new_mask = np.zeros(len(edges) - 1, dtype=bool)
+            new_mask[first:last + 1] = True
+            return cropped, new_mask
+
+        # 1. Filter by isotope
+        iso_cov = self.filter_by_isotope(zaid)
+        pairs = iso_cov._get_param_pairs()
+        if iso_cov.num_groups == 0:
+            raise ValueError(f"No data found for isotope {zaid}")
+
+        # Energy grid and optional cropping
+        if iso_cov.energy_grid is None:
+            raise ValueError("Covariance matrix missing energy grid information for plotting.")
+        edges_raw_full = np.asarray(iso_cov.energy_grid, dtype=float)
+        edges_cropped, keep_mask = _crop_edges(edges_raw_full)
+        G = len(edges_cropped) - 1
+
+        # 2. Parse MT input and determine diagonal vs off-diagonal
+        if isinstance(mt, tuple) and len(mt) == 2:
+            # Off-diagonal block: (row_mt, col_mt)
+            is_diagonal = False
+            row_mt, col_mt = mt
+            mts = [row_mt, col_mt]
+            
+            # Find row indices for row_mt
+            row_pairs = [(z, m) for z, m in pairs if z == zaid and m == row_mt]
+            if not row_pairs:
+                raise ValueError(f"MT {row_mt} not found for isotope {zaid}")
+            
+            # Find col indices for col_mt
+            col_pairs = [(z, m) for z, m in pairs if z == zaid and m == col_mt]
+            if not col_pairs:
+                raise ValueError(f"MT {col_mt} not found for isotope {zaid}")
+            
+            # Calculate index ranges
+            row_idx = pairs.index(row_pairs[0])
+            col_idx = pairs.index(col_pairs[0])
+            rows_full = list(range(row_idx * iso_cov.num_groups, (row_idx + 1) * iso_cov.num_groups))
+            cols_full = list(range(col_idx * iso_cov.num_groups, (col_idx + 1) * iso_cov.num_groups))
+            rows = [rows_full[i] for i, keep in enumerate(keep_mask) if keep]
+            cols = [cols_full[i] for i, keep in enumerate(keep_mask) if keep]
+            
+        else:
+            # Diagonal blocks
+            is_diagonal = True
+            
+            # Normalize to list
+            if isinstance(mt, int):
+                mts = [mt]
+            else:
+                mts = sorted(list(mt))
+            
+            # Find indices for each MT
+            rows = []
+            cols = []
+            for m in mts:
+                mt_pairs = [(z, mt_val) for z, mt_val in pairs if z == zaid and mt_val == m]
+                if not mt_pairs:
+                    raise ValueError(f"MT {m} not found for isotope {zaid}")
+                
+                idx = pairs.index(mt_pairs[0])
+                base_indices = list(range(idx * iso_cov.num_groups, (idx + 1) * iso_cov.num_groups))
+                kept = [base_indices[i] for i, keep in enumerate(keep_mask) if keep]
+                rows.extend(kept)
+                cols.extend(kept)
+        
+        # 3. Extract matrix
+        if matrix_type_normalized == 'corr':
+            M_full = iso_cov.clipped_correlation_matrix[np.ix_(rows, cols)]
+            mask_value = 0.0
+        else:  # 'cov'
+            M_full = iso_cov.covariance_matrix[np.ix_(rows, cols)]
+            mask_value = None
+        
+        # 4. Prepare geometry and block_info
+        transformed_edges = _transform_edges(edges_cropped)
+        width = transformed_edges[-1] - transformed_edges[0]
+        energy_ranges = {}
+        ranges_energy = []
+
+        if is_diagonal:
+            x_parts = []
+            for i, _ in enumerate(mts):
+                start = i * width
+                block_edges = (transformed_edges - transformed_edges[0]) + start
+                x_parts.append(block_edges if i == 0 else block_edges[1:])
+                energy_ranges[mts[i]] = (block_edges[0], block_edges[-1])
+                ranges_energy.append((block_edges[0], block_edges[-1]))
+            x_edges = np.concatenate(x_parts) if x_parts else None
+            y_edges = x_edges.copy() if x_edges is not None else None
+            extent = (float(x_edges[0]), float(x_edges[-1]), float(y_edges[0]), float(y_edges[-1])) if x_edges is not None else None
+            ranges = [(r[0], r[1]) for r in ranges_energy]
+        else:
+            x_edges = transformed_edges - transformed_edges[0]
+            y_edges = transformed_edges - transformed_edges[0]
+            extent = (float(x_edges[0]), float(x_edges[-1]), float(y_edges[0]), float(y_edges[-1]))
+            energy_ranges[mts[0]] = (y_edges[0], y_edges[-1])
+            energy_ranges[mts[1]] = (x_edges[0], x_edges[-1])
+            ranges = [(0.0, width), (0.0, width)]
+
+        block_info = {
+            'mts': mts,
+            'G': G,
+            'ranges': ranges,
+            'energy_ranges': energy_ranges,
+        }
+        
+        # 5. Compute uncertainties (always computed; rendering controlled by PlotBuilder.add_heatmap)
+        uncertainty_data = {}
+
+        if True:  # Always compute uncertainties
+            cov_matrix = iso_cov.covariance_matrix
+            for m in mts:
+                mt_pairs = [(z, mt_val) for z, mt_val in pairs if z == zaid and mt_val == m]
+                if not mt_pairs:
+                    continue
+
+                idx = pairs.index(mt_pairs[0])
+                base_indices = list(range(idx * iso_cov.num_groups, (idx + 1) * iso_cov.num_groups))
+                mt_rows = [base_indices[i] for i, keep in enumerate(keep_mask) if keep]
+
+                diag_variance = np.diag(cov_matrix)[mt_rows]
+
+                # Prefer relative-to-cross-section percent if nominal data exists; otherwise fall back to sqrt(variance)*100
+                if (zaid, m) in self.cross_sections:
+                    nominal_xs_full = np.asarray(self.cross_sections[(zaid, m)], dtype=float)
+                    nominal_xs = nominal_xs_full[keep_mask] if nominal_xs_full.size == iso_cov.num_groups else nominal_xs_full
+
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        sigma_percent = np.sqrt(np.abs(diag_variance)) / np.abs(nominal_xs) * 100.0
+                        sigma_percent = np.nan_to_num(sigma_percent, nan=0.0, posinf=0.0, neginf=0.0)
+                else:
+                    sigma_percent = np.sqrt(np.abs(diag_variance)) * 100.0
+
+                uncertainty_data[m] = sigma_percent
+
+            if not uncertainty_data:
+                uncertainty_data = None
+        
+        # 6. Get energy grid (cropped)
+        energy_grid = edges_cropped
+        
+        # 7. Generate label
+        from kika._utils import zaid_to_symbol
+        isotope_symbol = zaid_to_symbol(zaid)
+        if is_diagonal:
+            if len(mts) == 1:
+                label = f"{isotope_symbol} MT:{mts[0]} Correlation"
+            else:
+                label = f"{isotope_symbol} Correlation Matrix"
+        else:
+            label = f"{isotope_symbol} MT:{mts[0]} vs MT:{mts[1]} Correlation"
+        
+        # 8. Create and return CovarianceHeatmapData
+        heatmap_data = CovarianceHeatmapData(
+            matrix_data=M_full,
+            matrix_type=matrix_type_normalized,
+            zaid=zaid,
+            block_info=block_info,
+            uncertainty_data=uncertainty_data,
+            energy_grid=energy_grid,
+            show_energy_ticks=show_energy_ticks,
+            mt_labels=[str(m) for m in mts],
+            is_diagonal=is_diagonal,
+            mask_value=mask_value,
+            scale=scale_normalized,
+            x_edges=x_edges,
+            y_edges=y_edges,
+            extent=extent,
+            label=label
+        )
+        # Apply any extra heatmap kwargs onto the dataclass or metadata
+        for key, val in kwargs.items():
+            if key == "mask_color":
+                continue  # mask color is fixed to lightgray
+            if hasattr(heatmap_data, key):
+                setattr(heatmap_data, key, val)
+            else:
+                heatmap_data.metadata[key] = val
+        return heatmap_data
+    
     def plot_covariance_heatmap(
         self,
-        zaid: int,
+        nuclide: Union[int, str],
         mt: Union[int, Sequence[int], Tuple[int, int]],
         ax: plt.Axes = None,
         *,
-        style: str = "default",
+        matrix_type: str = "corr",
         figsize: Tuple[float, float] = (6, 6),
         dpi: int = 300,
         font_family: str = "serif",
@@ -962,24 +1348,32 @@ class CovMat:
         vmin: float = None,
         show_uncertainties: bool = True,
         show_energy_ticks: bool = True,
+        scale: str = "log",
+        energy_range: Optional[Tuple[float, float]] = None,
         **imshow_kwargs
-    ) -> Union[plt.Axes, Tuple[plt.Axes, List[plt.Axes]]]:
+    ) -> plt.Figure:
         """
-        Draw a correlation-matrix heat-map for a specified isotope and MT reaction(s).
+        Draw a covariance or correlation matrix heatmap for a specified isotope and MT reaction(s).
+        
+        This method now uses the modern PlotBuilder-based implementation from
+        kika.plotting.covariance for cleaner, more maintainable code.
 
         Parameters
         ----------
-        zaid : int
-            Isotope ID
+        nuclide : int or str
+            Isotope identifier. Can be either:
+            - Integer ZAID (e.g., 92235 for U-235)
+            - Element-mass string (e.g., 'U235', 'Fe56')
         mt : int, sequence of int, or tuple of (row_mt, col_mt)
             MT reaction number(s). Can be:
             - Single int: diagonal block for that MT
             - Sequence of ints: diagonal blocks for those MTs  
             - Tuple of (row_mt, col_mt): off-diagonal block between row and column MT
         ax : plt.Axes, optional
-            Matplotlib axes to draw into (only used when show_uncertainties=False)
-        style : str
-            Plot style: 'default', 'dark', 'paper', 'publication', 'presentation'
+            Matplotlib axes to draw into (deprecated, kept for compatibility)
+        matrix_type : str, default "corr"
+            Type of matrix to plot: "corr"/"correlation" for correlation matrix,
+            or "cov"/"covariance" for covariance matrix
         figsize : tuple
             Figure size in inches (width, height)
         dpi : int
@@ -992,23 +1386,25 @@ class CovMat:
             Whether to show uncertainty plots above the heatmap
         show_energy_ticks : bool
             Whether to show energy group ticks and labels on the heatmap axes
+        scale : str, default "log"
+            Energy axis scale: "log"/"logarithmic" or "lin"/"linear"
+        energy_range : tuple of float, optional
+            Energy range (min, max) for filtering. Values in eV.
         **imshow_kwargs
-            Additional arguments passed to imshow
+            Additional arguments passed to imshow (deprecated)
 
         Returns
         -------
-        plt.Axes or tuple
-            If show_uncertainties=False: returns the heatmap axes
-            If show_uncertainties=True: returns (heatmap_axes, uncertainty_axes_list)
+        plt.Figure
+            The matplotlib figure containing the heatmap and optional uncertainty plots
         """
-        from kika.cov.heatmap import plot_covariance_heatmap as _plot_covariance_heatmap
+        from kika.plotting.covariance import plot_covariance_heatmap as _plot_covariance_heatmap
         
         return _plot_covariance_heatmap(
             covmat=self,
-            zaid=zaid,
+            nuclide=nuclide,
             mt=mt,
-            ax=ax,
-            style=style,
+            matrix_type=matrix_type,
             figsize=figsize,
             dpi=dpi,
             font_family=font_family,
@@ -1016,7 +1412,8 @@ class CovMat:
             vmin=vmin,
             show_uncertainties=show_uncertainties,
             show_energy_ticks=show_energy_ticks,
-            **imshow_kwargs
+            scale=scale,
+            energy_range=energy_range,
         )
     
     

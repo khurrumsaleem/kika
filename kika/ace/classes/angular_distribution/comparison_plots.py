@@ -8,7 +8,7 @@ the resulting ACE objects to these comparison functions.
 
 from typing import List, Union, Optional, Tuple, Dict, Any
 import numpy as np
-from kika._plot_settings import setup_plot_style, format_axes, finalize_plot
+from kika.plotting.styles import format_axes, setup_plot_style, finalize_plot
 
 
 def plot_ace_angular_comparison(ace_objects: List, 

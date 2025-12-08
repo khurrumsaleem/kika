@@ -6,8 +6,8 @@ creating SDF data objects from sensitivity data, and other related utility funct
 
 from typing import Dict, List, Tuple, Union
 import numpy as np
-from kika.input.parse_input import read_mcnp
-from kika.mctal.parse_mctal import read_mctal
+from kika.mcnp.parse_input import read_mcnp
+from kika.mcnp.parse_mctal import read_mctal
 from kika._constants import ATOMIC_NUMBER_TO_SYMBOL, MT_TO_REACTION
 from kika.sensitivities.sensitivity import SensitivityData, Coefficients, TaylorCoefficients
 from kika.sensitivities.sdf import SDFData, SDFReactionData
