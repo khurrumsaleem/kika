@@ -18,6 +18,7 @@ from .plot_data import (
     MF34HeatmapData,
 )
 from .plot_builder import PlotBuilder
+from .heatmap_builder import HeatmapBuilder
 
 __all__ = [
     'PlotData',
@@ -31,4 +32,5 @@ __all__ = [
     'CovarianceHeatmapData',
     'MF34HeatmapData',
     'PlotBuilder',
+    'HeatmapBuilder',
 ]

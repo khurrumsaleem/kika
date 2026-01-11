@@ -7,6 +7,7 @@ docs/build/
 # VSCODE
 .vscode/
 *.code-workspace
+.claude/
 
 # Personal docs
 _README.md
@@ -31,3 +32,5 @@ kika/cov/tests/test_plotbuilder_direct.ipynb
 kika/plotting/tests/test_old_vs_new_covariance.ipynb
 kika/ace/work.ipynb
 kika/endf/classes/mf4/debug_example.ipynb
+nul
+dir

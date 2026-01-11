@@ -89,10 +89,10 @@ class MF4MTLegendre(MF4MT):
     ):
         """
         Create a PlotData object for this Legendre coefficient data.
-        
+
         This is a convenience method to easily convert MF4 data into a plottable format
         using the new plotting infrastructure.
-        
+
         Parameters
         ----------
         order : int
@@ -101,24 +101,100 @@ class MF4MTLegendre(MF4MT):
             Custom label for the plot. If None, auto-generates from isotope and order.
         **styling_kwargs
             Additional styling kwargs (color, linestyle, linewidth, etc.)
-            
+
         Returns
         -------
         LegendreCoeffPlotData
             Plot data object ready to be added to a PlotBuilder
-            
+
         Examples
         --------
         >>> # Method 1: Using this convenience method
         >>> data = mf4_obj.to_plot_data(order=1, color='blue')
         >>> builder = PlotBuilder().add_data(data).build()
-        >>> 
+        >>>
         >>> # Method 2: Using utility function (equivalent)
         >>> from kika.endf.classes.mf4.plot_utils import create_legendre_coeff_plot_data
         >>> data = create_legendre_coeff_plot_data(mf4_obj, order=1, color='blue')
         """
         from .plot_utils import create_legendre_coeff_plot_data
         return create_legendre_coeff_plot_data(self, order=order, label=label, **styling_kwargs)
+
+    def to_bulk_plot_data(self, max_order: int = None) -> Dict[str, Union[List[float], Dict[int, List[float]], int, str]]:
+        """
+        Extract ALL Legendre orders at once for bulk loading.
+
+        This method is optimized for frontend applications that need to cache
+        all orders and switch between them without additional backend requests.
+
+        Parameters
+        ----------
+        max_order : int, optional
+            Maximum Legendre order to extract. If None, uses the maximum
+            available order in the data.
+
+        Returns
+        -------
+        dict
+            Dictionary containing:
+            - 'energies': list of energy values (eV)
+            - 'coefficients_by_order': dict mapping order (int) to list of coefficients
+            - 'max_order': maximum order extracted
+            - 'isotope': isotope identifier (if available)
+            - 'mt': MT reaction number
+
+        Examples
+        --------
+        >>> bulk_data = mf4_legendre.to_bulk_plot_data()
+        >>> # Access order 2 coefficients
+        >>> order_2_coeffs = bulk_data['coefficients_by_order'][2]
+        >>> # Plot with frontend filtering - no backend call needed
+        """
+        energies = np.array(self._energies, dtype=float)
+
+        if len(energies) == 0:
+            return {
+                'energies': [],
+                'coefficients_by_order': {},
+                'max_order': 0,
+                'isotope': getattr(self, 'isotope', None),
+                'mt': getattr(self, 'number', None),
+            }
+
+        # Determine max order from data if not specified
+        file_max_order = 0
+        for coeffs in self._legendre_coeffs:
+            if coeffs:
+                file_max_order = max(file_max_order, len(coeffs))
+
+        if max_order is None:
+            max_order = file_max_order
+        else:
+            max_order = min(max_order, file_max_order) if file_max_order > 0 else max_order
+
+        # Extract coefficients for all orders
+        coefficients_by_order: Dict[int, List[float]] = {}
+
+        # Order 0 is always 1.0 (ENDF convention)
+        coefficients_by_order[0] = [1.0] * len(energies)
+
+        # Orders 1 to max_order from stored coefficients
+        for order in range(1, max_order + 1):
+            order_coeffs = []
+            for coeffs in self._legendre_coeffs:
+                if coeffs and (order - 1) < len(coeffs):
+                    order_coeffs.append(float(coeffs[order - 1]))
+                else:
+                    order_coeffs.append(0.0)
+            coefficients_by_order[order] = order_coeffs
+
+        return {
+            'energies': energies.tolist(),
+            'coefficients_by_order': coefficients_by_order,
+            'max_order': max_order,
+            'isotope': getattr(self, 'isotope', None),
+            'mt': getattr(self, 'number', None),
+        }
     
     def extract_legendre_coefficients(
         self,

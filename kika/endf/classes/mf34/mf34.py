@@ -575,10 +575,15 @@ class MF34MT(MT):
         return projected_matrix
 
 
-    def to_ang_covmat(self) -> 'MF34CovMat': 
+    def to_ang_covmat(self, energy_unit: str = 'eV') -> 'MF34CovMat': 
         """
         Convert the MF34MT data to an MF34CovMat object, aggregating LIST records
         per sub-subsection (L, L1 pair) according to ENDF rules for relative covariance.
+
+        Parameters
+        ----------
+        energy_unit : str, optional
+            Energy unit for the energy grids: 'eV' (default) or 'MeV'
 
         Returns
         -------
@@ -590,7 +595,7 @@ class MF34MT(MT):
 
         isotope = int(self._za)
         reaction = self.number
-        ang_covmat = MF34CovMat()
+        ang_covmat = MF34CovMat(energy_unit=energy_unit)
 
         # Process each subsection (MT1)
         logger.debug(f"Found {len(self._subsections)} subsections (MT1).")
@@ -882,8 +887,10 @@ class MF34MT(MT):
             
         Returns
         -------
-        LegendreUncertaintyPlotData
-            Plot data object ready to be added to a PlotBuilder
+        tuple of (None, LegendreUncertaintyPlotData)
+            Returns a tuple where the first element is None (for consistency with
+            other to_plot_data methods) and the second is the uncertainty plot data
+            object ready to be added to a PlotBuilder
             
         Raises
         ------
@@ -894,7 +901,7 @@ class MF34MT(MT):
         --------
         >>> # Extract uncertainty data from MF34MT
         >>> mf34_mt2 = endf.mf[34].mt[2]
-        >>> unc_data = mf34_mt2.to_plot_data(order=1)
+        >>> _, unc_data = mf34_mt2.to_plot_data(order=1)
         >>> 
         >>> # Build a plot
         >>> from kika.plotting import PlotBuilder
@@ -907,9 +914,9 @@ class MF34MT(MT):
         isotope = int(self._za)
         mt = self.number
         
-        # Delegate to MF34CovMat's to_plot_data method
+        # Delegate to MF34CovMat's to_plot_data method (returns tuple)
         return mf34_covmat.to_plot_data(
-            isotope=isotope,
+            nuclide=isotope,
             mt=mt,
             order=order,
             uncertainty_type=uncertainty_type,

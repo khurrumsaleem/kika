@@ -14,6 +14,7 @@ from typing import Union, List, Tuple, Optional
 from kika.cov.multigroup.mg_mf34_covmat import MGMF34CovMat
 from kika.cov.mf34_covmat import MF34CovMat
 from kika.plotting.plot_builder import PlotBuilder
+from kika.plotting.heatmap_builder import HeatmapBuilder
 
 
 def plot_mg_legendre_coefficients(
@@ -861,12 +862,19 @@ def plot_mg_covariance_heatmap(
         energy_range=energy_range,
     )
     
-    # Override colormap and limits if provided
+    # Override colormap if provided
     if cmap is not None:
         heatmap_data.cmap = cmap
+
+    # Warn about deprecated vmin/vmax parameters
+    import warnings
     if vmin is not None or vmax is not None:
-        heatmap_data.vmin = vmin
-        heatmap_data.vmax = vmax
+        warnings.warn(
+            "vmin and vmax parameters are deprecated and will be ignored. "
+            "Auto-scaling is now used for colorbar normalization.",
+            DeprecationWarning,
+            stacklevel=2
+        )
     
     # Set title based on parameter
     from kika._utils import zaid_to_symbol
@@ -879,13 +887,13 @@ def plot_mg_covariance_heatmap(
     else:
         heatmap_data.label = None
     
-    # Create the plot using PlotBuilder (always use light style for heatmaps)
-    builder = PlotBuilder(style="light", figsize=figsize, dpi=dpi, font_family=font_family)
+    # Create the plot using HeatmapBuilder (always use light style for heatmaps)
+    builder = HeatmapBuilder(style="light", figsize=figsize, dpi=dpi, font_family=font_family)
     fig = builder.add_heatmap(
         heatmap_data,
         show_uncertainties=show_uncertainties,
-    )
-    
+    ).build()
+
     # If uncertainties panels are shown, lower the title slightly for better layout
     if show_uncertainties and fig is not None and heatmap_data.label:
         try:

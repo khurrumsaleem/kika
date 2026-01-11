@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from typing import Union, Sequence, Tuple, List, Optional
 from kika.cov.covmat import CovMat
 from kika.cov.mf34_covmat import MF34CovMat
+from kika.plotting.heatmap_builder import HeatmapBuilder
 from kika.plotting.plot_builder import PlotBuilder
 
 
@@ -27,7 +28,6 @@ def plot_covariance_heatmap(
     vmax: float | None = None,
     vmin: float | None = None,
     show_uncertainties: bool = True,
-    show_energy_ticks: bool = True,
     scale: str = "log",
     energy_range: Optional[Tuple[float, float]] = None,
 ) -> plt.Figure:
@@ -61,13 +61,11 @@ def plot_covariance_heatmap(
     font_family : str, default "serif"
         Font family for text elements
     vmax, vmin : float, optional
-        Color scale limits. If not provided, auto-computed from data.
+        DEPRECATED: These parameters are ignored. Auto-scaling is used.
     show_uncertainties : bool, default True
         Whether to show uncertainty plots above the heatmap
-    show_energy_ticks : bool, default True
-        Whether to show energy group ticks and labels on the heatmap axes
     scale : str, default "log"
-        Energy axis scale: "log"/"logarithmic" or "lin"/"linear"
+        Energy axis scale: "log"/"logarithmic" or "lin"/"linear'
     energy_range : tuple of float, optional
         Energy range (min, max) for filtering. Values in eV.
 
@@ -136,23 +134,27 @@ def plot_covariance_heatmap(
         nuclide=nuclide,
         mt=mt,
         matrix_type=matrix_type_normalized,
-        show_energy_ticks=show_energy_ticks,
         scale=scale_normalized,
         energy_range=energy_range,
     )
     
-    # Override colormap limits if provided
+    # Warn about deprecated vmin/vmax parameters
+    import warnings
     if vmin is not None or vmax is not None:
-        heatmap_data.vmin = vmin
-        heatmap_data.vmax = vmax
-    
-    # Create the plot using PlotBuilder (always use light style for heatmaps)
-    builder = PlotBuilder(style="light", figsize=figsize, dpi=dpi, font_family=font_family)
+        warnings.warn(
+            "vmin and vmax parameters are deprecated and will be ignored. "
+            "Auto-scaling is now used for colorbar normalization.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+
+    # Create the plot using HeatmapBuilder (always use light style for heatmaps)
+    builder = HeatmapBuilder(style="light", figsize=figsize, dpi=dpi, font_family=font_family)
     fig = builder.add_heatmap(
         heatmap_data,
         show_uncertainties=show_uncertainties,
-    )
-    # If uncertainties panels are shown, the PlotBuilder places the suptitle
+    ).build()
+    # If uncertainties panels are shown, the HeatmapBuilder places the suptitle
     # a bit high; nudge it down slightly for better layout.
     if show_uncertainties and fig is not None:
         # Determine effective title used by builder/heatmap_data
@@ -216,7 +218,7 @@ def plot_mf34_covariance_heatmap(
     font_family : str, default "serif"
         Font family for text elements
     vmax, vmin : float, optional
-        Color scale limits
+        DEPRECATED: These parameters are ignored. Auto-scaling is used.
     show_uncertainties : bool, default False
         Whether to show uncertainty plots above the heatmap
     cmap : str, optional
@@ -297,25 +299,31 @@ def plot_mf34_covariance_heatmap(
         legendre_coeffs=legendre_coeffs,
         matrix_type=matrix_type_normalized,
         scale=scale_normalized,
-        show_energy_ticks=True,  # Always show energy ticks for MF34
         energy_range=energy_range,
     )
     
-    # Override colormap and limits if provided
+    # Override colormap if provided
     if cmap is not None:
         heatmap_data.cmap = cmap
+
+    # Warn about deprecated vmin/vmax parameters
+    import warnings
     if vmin is not None or vmax is not None:
-        heatmap_data.vmin = vmin
-        heatmap_data.vmax = vmax
-    
-    # Create the plot using PlotBuilder (always use light style for heatmaps)
-    builder = PlotBuilder(style="light", figsize=figsize, dpi=dpi, font_family=font_family)
+        warnings.warn(
+            "vmin and vmax parameters are deprecated and will be ignored. "
+            "Auto-scaling is now used for colorbar normalization.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+
+    # Create the plot using HeatmapBuilder (always use light style for heatmaps)
+    builder = HeatmapBuilder(style="light", figsize=figsize, dpi=dpi, font_family=font_family)
     fig = builder.add_heatmap(
         heatmap_data,
         show_uncertainties=show_uncertainties,
-    )
-    
-    # If uncertainties panels are shown, the PlotBuilder places the suptitle
+    ).build()
+
+    # If uncertainties panels are shown, the HeatmapBuilder places the suptitle
     # a bit high; nudge it down slightly for better layout.
     if show_uncertainties and fig is not None:
         # Determine effective title used by builder/heatmap_data

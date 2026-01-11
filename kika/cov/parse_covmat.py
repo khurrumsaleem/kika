@@ -14,7 +14,7 @@ class InvalidDataFormatError(Exception):
     """Raised when the data format is invalid or corrupted."""
     pass
 
-def read_scale_covmat(file_path: str, ascending: bool = True):
+def read_scale_covmat(file_path: str, ascending: bool = True, energy_unit: str = 'eV'):
     """
     Read a SCALE covariance matrix file and convert it to a CovMat object.
     
@@ -24,6 +24,8 @@ def read_scale_covmat(file_path: str, ascending: bool = True):
         Path to the SCALE covariance matrix text file
     ascending : bool, optional
         If True, the energies will be ordered in ascending order (default is True)
+    energy_unit : str, optional
+        Energy unit for the energy grid: 'eV' (default) or 'MeV'
         
     Returns
     -------
@@ -45,7 +47,7 @@ def read_scale_covmat(file_path: str, ascending: bool = True):
     num_groups = int(file_lines[1].split()[0])
     
     # Create CovMat object
-    covmat = CovMat(num_groups)
+    covmat = CovMat(num_groups, energy_unit=energy_unit)
 
     # Determine the energy grid based on the number of groups
     potential_grids = {
@@ -100,11 +102,23 @@ def read_scale_covmat(file_path: str, ascending: bool = True):
 
     return covmat
 
-def read_njoy_covmat(file_path: str) -> CovMat:
+def read_njoy_covmat(file_path: str, energy_unit: str = 'eV') -> CovMat:
     """
     Parse an NJOY-generated covariance file and return a CovMat instance.
     The routine now stores MF3 cross sections in `CovMat.cross_sections`
     instead of treating them as pseudo-matrices with REAC_V = 0.
+    
+    Parameters
+    ----------
+    file_path : str
+        Path to the NJOY-generated covariance file
+    energy_unit : str, optional
+        Energy unit for the energy grid: 'eV' (default) or 'MeV'
+        
+    Returns
+    -------
+    CovMat
+        CovMat instance with parsed covariance data
     """
 
     dikt_cov = {'ISO_H': [], 'REAC_H': [],
@@ -175,7 +189,7 @@ def read_njoy_covmat(file_path: str) -> CovMat:
             dikt_cov['REAC_H'].append('0')
             dikt_cov['ISO_V'].append('0')
             dikt_cov['REAC_V'].append('0')
-            dikt_cov['STD'].append([e * 1e-6 for e in energymesh])
+            dikt_cov['STD'].append(energymesh)
             continue
 
         # MF3 – point cross sections -------------------------------------
@@ -241,7 +255,7 @@ def read_njoy_covmat(file_path: str) -> CovMat:
     # ------------------------------------------------------------------
     # Build CovMat
     # ------------------------------------------------------------------
-    covmat = CovMat(num_groups=group_nb)
+    covmat = CovMat(num_groups=group_nb, energy_unit=energy_unit)
 
     # energy grid --------------------------------------------------------
     if (dikt_cov['STD']

@@ -455,5 +455,91 @@ class CrossSectionData:
             plot_type='line'
         )
     
+    def to_bulk_plot_data(self, mt_list: List[int] = None) -> Dict[str, Union[List[float], Dict[int, List[float]], List[int]]]:
+        """
+        Extract ALL cross sections at once for bulk loading.
+
+        This is optimized for frontend applications that need to cache all
+        cross sections and switch between them without additional backend requests.
+
+        The method returns a shared energy grid (sent once) and cross section
+        values for each MT. Reactions that start at a higher energy index are
+        padded with zeros at the beginning.
+
+        Parameters
+        ----------
+        mt_list : List[int], optional
+            List of MT numbers to include. If None, all available MTs are included.
+
+        Returns
+        -------
+        dict
+            Dictionary with keys:
+            - 'energies': List[float] - shared energy grid in MeV
+            - 'xs_by_mt': Dict[int, List[float]] - cross sections keyed by MT number
+            - 'available_mts': List[int] - list of available MT numbers
+            - 'x_unit': str - unit for x-axis
+            - 'y_unit': str - unit for y-axis
+
+        Examples
+        --------
+        >>> ace = kika.read_ace('fe56.ace')
+        >>> bulk_data = ace.cross_section.to_bulk_plot_data()
+        >>> # Access MT=2 directly - no additional computation needed
+        >>> elastic_xs = bulk_data['xs_by_mt'][2]
+        >>> energies = bulk_data['energies']
+        """
+        if not self.has_data:
+            raise ValueError("No cross section data available")
+
+        if self.energy_grid is None:
+            raise ValueError("Energy grid is required but none is available")
+
+        # Get full energy grid
+        energy_values = [e.value for e in self.energy_grid]
+        num_energies = len(energy_values)
+
+        # Determine which MTs to include
+        if mt_list is None:
+            mt_list = self.mt_numbers
+
+        # Build cross sections dictionary
+        xs_by_mt: Dict[int, List[float]] = {}
+        available_mts: List[int] = []
+
+        for mt in mt_list:
+            reaction = self._get_or_compute_reaction(mt)
+            if reaction is None:
+                continue
+
+            available_mts.append(mt)
+
+            if not reaction._xs_entries:
+                # No data - fill with zeros
+                xs_by_mt[mt] = [0.0] * num_energies
+                continue
+
+            # Create array padded to full energy grid
+            xs_values = [0.0] * num_energies
+
+            # Determine where to place values
+            start_idx = reaction.energy_idx
+            end_idx = min(start_idx + reaction.num_energies, num_energies)
+
+            if start_idx >= 0 and start_idx < num_energies:
+                actual_length = min(len(reaction._xs_entries), end_idx - start_idx)
+                for i in range(actual_length):
+                    xs_values[start_idx + i] = reaction._xs_entries[i].value
+
+            xs_by_mt[mt] = xs_values
+
+        return {
+            'energies': energy_values,
+            'xs_by_mt': xs_by_mt,
+            'available_mts': sorted(available_mts),
+            'x_unit': 'Energy (MeV)',
+            'y_unit': 'Cross Section (barns)',
+        }
+
     def __repr__(self):
         return xs_data_repr(self)
