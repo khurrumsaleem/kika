@@ -509,10 +509,11 @@ class Ace:
         # Get label
         label = kwargs.get('label', None)
         if label is None:
-            # Create default label from isotope and MT
-            isotope = self.header.zaid if self.header else "Unknown"
-            label = f"{isotope} MT={mt}"
-        
+            # Create default label from isotope and MT using consistent formatting
+            from kika._constants import format_plot_label
+            zaid = self.header.zaid if self.header else None
+            label = format_plot_label(zaid=zaid, mt=mt)
+
         return PlotData(
             x=np.array(energies),
             y=np.array(xs_values),
@@ -565,9 +566,10 @@ class Ace:
         # Get label
         label = kwargs.get('label', None)
         if label is None:
-            isotope = self.header.zaid if self.header else "Unknown"
-            label = f"{isotope} MT={mt} @ {energy} MeV"
-        
+            from kika._constants import format_plot_label
+            zaid = self.header.zaid if self.header else None
+            label = format_plot_label(zaid=zaid, mt=mt, energy=energy)
+
         return PlotData(
             x=np.array(mu),
             y=np.array(pdf),

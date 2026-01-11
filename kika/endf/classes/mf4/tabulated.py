@@ -293,13 +293,12 @@ class MF4MTTabulated(MF4MT):
             isotope = str(self.zaid)
         
         mt = getattr(self, 'number', None)
-        
+
         # Auto-generate label if not provided
         if label is None:
-            label = f'Tabulated→Legendre L={order}'
-            if isotope:
-                label = f'{isotope} {label}'
-        
+            from kika._constants import format_plot_label
+            label = format_plot_label(isotope=isotope, mt=mt, order=order)
+
         return LegendreCoeffPlotData(
             x=energies,
             y=coeff_values,

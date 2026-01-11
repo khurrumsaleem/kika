@@ -1671,10 +1671,14 @@ class PlotBuilder:
             if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
                 self.ax.set_xlim(x_min, x_max)
         else:
-            # Apply user-specified limits
+            # Apply user-specified limits (validate for log scale)
             if self._x_lim is not None:
-                self.ax.set_xlim(self._x_lim)
-        
+                x_lim = self._x_lim
+                if self._use_log_x:
+                    # For log scale, ensure limits are positive
+                    x_lim = (max(x_lim[0], 1e-10), max(x_lim[1], 1e-10))
+                self.ax.set_xlim(x_lim)
+
         if self._y_lim is None and self._data_list:
             # Find the data range across all datasets (including uncertainty bands)
             y_values = []
@@ -1719,10 +1723,14 @@ class PlotBuilder:
                             y_max = y_max + padding
                         self.ax.set_ylim(y_min, y_max)
         else:
-            # Apply user-specified limits
+            # Apply user-specified limits (validate for log scale)
             if self._y_lim is not None:
-                self.ax.set_ylim(self._y_lim)
-        
+                y_lim = self._y_lim
+                if self._use_log_y:
+                    # For log scale, ensure limits are positive
+                    y_lim = (max(y_lim[0], 1e-10), max(y_lim[1], 1e-10))
+                self.ax.set_ylim(y_lim)
+
         # Apply axis labels
         if self._x_label is not None:
             if self._label_fontsize is not None:

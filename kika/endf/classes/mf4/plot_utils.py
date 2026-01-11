@@ -96,12 +96,8 @@ def create_legendre_coeff_plot_data(
 
     # Auto-generate label if not provided
     if label is None:
-        if isotope:
-            label = f"{isotope} L={order}"
-        else:
-            label = f"L={order}"
-        if mt is not None:
-            label = f"{label} (MT{mt})"
+        from kika._constants import format_plot_label
+        label = format_plot_label(isotope=isotope, mt=mt, order=order)
 
     return LegendreCoeffPlotData(
         x=energies,
