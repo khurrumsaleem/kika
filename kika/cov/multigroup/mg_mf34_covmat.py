@@ -16,6 +16,7 @@ from kika.plotting.plot_builder import PlotBuilder
 
 if TYPE_CHECKING:
     from ..mf34_covmat import MF34CovMat
+    from kika.plotting.plot_data import UncertaintyBand
 
 @dataclass
 class MGMF34CovMat:
@@ -55,6 +56,8 @@ class MGMF34CovMat:
         Description of weighting function used (e.g., "constant", "flux-weighted")
     legendre_coefficients : Dict[Tuple[int, int, int], np.ndarray]
         Dictionary mapping (isotope, mt, l) to multigroup Legendre coefficients
+    energy_unit : str
+        Energy unit for energy_grid: 'eV' (default) or 'MeV'
     """
     isotope_rows: List[int] = field(default_factory=list)
     reaction_rows: List[int] = field(default_factory=list)
@@ -71,6 +74,7 @@ class MGMF34CovMat:
     weighting_function: str = "constant"
     relative_normalization: str = "mf34_cell"
     legendre_coefficients: Dict[Tuple[int, int, int], np.ndarray] = field(default_factory=dict)
+    energy_unit: str = 'eV'  # Energy unit: 'eV' or 'MeV'
 
     @property
     def num_matrices(self) -> int:
@@ -574,7 +578,6 @@ class MGMF34CovMat:
             },
             uncertainty_data=uncertainty_data,
             energy_grid=edges_cropped,
-            show_energy_ticks=show_energy_ticks,
             mt_labels=[f"L={l}" for l in legendre_list],
             is_diagonal=is_diagonal,
             mask_value=mask_value,
@@ -634,7 +637,7 @@ class MGMF34CovMat:
             # Return the list for the specified isotope, or empty list if not found
             return sorted_dict.get(isotope, [])
 
-        return True
+        return sorted_dict
 
     def to_plot_data(
         self,

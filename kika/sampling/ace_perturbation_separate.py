@@ -558,7 +558,16 @@ def perturb_seprate_ACE_files(
         
         _logger.info(f"\n{subseparator}\n")
 
-        energy_grid = cov.energy_grid
+        # Convert energy grid from eV to MeV for ACE (ACE energies are in MeV)
+        # CovMat now stores energies in eV by default
+        energy_grid_eV = cov.energy_grid
+        if cov.energy_unit == 'eV':
+            energy_grid = [e / 1e6 for e in energy_grid_eV]  # Convert eV to MeV
+            _logger.info(f"  Converted energy grid from eV to MeV for ACE compatibility")
+        elif cov.energy_unit == 'MeV':
+            energy_grid = energy_grid_eV
+        else:
+            raise ValueError(f"Unknown energy unit '{cov.energy_unit}' in covariance matrix")
 
         # Save pre-autofix MT list
         pre_autofix_mts = list(mt_perturb)

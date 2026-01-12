@@ -59,103 +59,194 @@ MT_GROUPS = [
 ]
 
 MT_TO_REACTION = {
-    1: "(n,total).",
-    2: "(z,z0)",
-    3: "(z,nonelas.)",
-    4: "(z,n')",
-    5: "(z,anything)",
-    10: "(z,contin.)",
-    11: "(z,2nd)",
-    16: "(z,2n)",
-    17: "(z,3n)",
-    18: "(z,fission)",
+    1: "(n,total)",
+    2: "(n,el)",
+    3: "(n,nonelastic)",
+    4: "(n,n')",
+    5: "(n,anything)",
+    10: "(n,continuum)",
+    11: "(n,2nd)",
+    16: "(n,2n)",
+    17: "(n,3n)",
+    18: "(n,fission)",
     19: "(n,f)",
     20: "(n,nf)",
     21: "(n,2nf)",
-    22: "(z,nα)",
+    22: "(n,nα)",
     23: "(n,n3α)",
-    24: "(z,2nα)",
-    25: "(z,3nα)",
+    24: "(n,2nα)",
+    25: "(n,3nα)",
     27: "(n,abs)",
-    28: "(z,np)",
-    29: "(z,n2α)",
-    30: "(z,2n2α)",
-    32: "(z,nd)",
-    33: "(z,nt)",
-    34: "(z,n3He)",
-    35: "(z,nd2α)",
-    36: "(z,nt2α)",
-    37: "(z,4n)",
+    28: "(n,np)",
+    29: "(n,n2α)",
+    30: "(n,2n2α)",
+    32: "(n,nd)",
+    33: "(n,nt)",
+    34: "(n,n³He)",
+    35: "(n,nd2α)",
+    36: "(n,nt2α)",
+    37: "(n,4n)",
     38: "(n,3nf)",
-    41: "(z,2np)",
-    42: "(z,3np)",
-    44: "(z,n2p)",
-    45: "(z,npα)",
-    51: "(z,n'1)",
-    52: "(z,n'2)",
-    53: "(z,n'3)",
-    54: "(z,n'4)",
-    55: "(z,n'5)",
-    56: "(z,n'6)",
-    57: "(z,n'7)",
-    58: "(z,n'8)",
-    59: "(z,n'9)",
-    60: "(z,n'10)",
-    61: "(z,n'11)",
-    62: "(z,n'12)",
-    63: "(z,n'13)",
-    64: "(z,n'14)",
-    65: "(z,n'15)",
-    66: "(z,n'16)",
-    67: "(z,n'17)",
-    68: "(z,n'18)",
-    69: "(z,n'19)",
-    70: "(z,n'20)",
-    71: "(z,n'21)",
-    72: "(z,n'22)",
-    73: "(z,n'23)",
-    74: "(z,n'24)",
-    75: "(z,n'25)",
-    76: "(z,n'26)",
-    77: "(z,n'27)",
-    78: "(z,n'28)",
-    79: "(z,n'29)",
-    80: "(z,n'30)",
-    81: "(z,n'31)",
-    82: "(z,n'32)",
-    83: "(z,n'33)",
-    84: "(z,n'34)",
-    85: "(z,n'35)",
-    86: "(z,n'36)",
-    87: "(z,n'37)",
-    88: "(z,n'38)",
-    89: "(z,n'39)",
-    90: "(z,n'40)",
-    91: "(z,n'c)",
+    41: "(n,2np)",
+    42: "(n,3np)",
+    44: "(n,n2p)",
+    45: "(n,npα)",
+    51: "(n,n'₁)",
+    52: "(n,n'₂)",
+    53: "(n,n'₃)",
+    54: "(n,n'₄)",
+    55: "(n,n'₅)",
+    56: "(n,n'₆)",
+    57: "(n,n'₇)",
+    58: "(n,n'₈)",
+    59: "(n,n'₉)",
+    60: "(n,n'₁₀)",
+    61: "(n,n'₁₁)",
+    62: "(n,n'₁₂)",
+    63: "(n,n'₁₃)",
+    64: "(n,n'₁₄)",
+    65: "(n,n'₁₅)",
+    66: "(n,n'₁₆)",
+    67: "(n,n'₁₇)",
+    68: "(n,n'₁₈)",
+    69: "(n,n'₁₉)",
+    70: "(n,n'₂₀)",
+    71: "(n,n'₂₁)",
+    72: "(n,n'₂₂)",
+    73: "(n,n'₂₃)",
+    74: "(n,n'₂₄)",
+    75: "(n,n'₂₅)",
+    76: "(n,n'₂₆)",
+    77: "(n,n'₂₇)",
+    78: "(n,n'₂₈)",
+    79: "(n,n'₂₉)",
+    80: "(n,n'₃₀)",
+    81: "(n,n'₃₁)",
+    82: "(n,n'₃₂)",
+    83: "(n,n'₃₃)",
+    84: "(n,n'₃₄)",
+    85: "(n,n'₃₅)",
+    86: "(n,n'₃₆)",
+    87: "(n,n'₃₇)",
+    88: "(n,n'₃₈)",
+    89: "(n,n'₃₉)",
+    90: "(n,n'₄₀)",
+    91: "(n,n'c)",
     101: "(n,disap)",
-    102: "(z,γ)",
-    103: "(z,p)",
-    104: "(z,d)",
-    105: "(z,t)",
-    106: "(z,3He)",
-    107: "(z,α)",
-    108: "(z,2α)",
-    109: "(z,3α)",
-    111: "(z,2p)",
-    112: "(z,pα)",
-    113: "(z,t2α)",
-    114: "(z,d2α)",
-    115: "(z,pd)",
-    116: "(z,pt)",
-    117: "(z,dα)",
+    102: "(n,γ)",
+    103: "(n,p)",
+    104: "(n,d)",
+    105: "(n,t)",
+    106: "(n,³He)",
+    107: "(n,α)",
+    108: "(n,2α)",
+    109: "(n,3α)",
+    111: "(n,2p)",
+    112: "(n,pα)",
+    113: "(n,t2α)",
+    114: "(n,d2α)",
+    115: "(n,pd)",
+    116: "(n,pt)",
+    117: "(n,dα)",
     # Legendre coefficients for elastic angular distributions (custom extension)
-    4001: "(z,z0)P1",
-    4002: "(z,z0)P2", 
-    4003: "(z,z0)P3",
-    4004: "(z,z0)P4",
-    4005: "(z,z0)P5",
-    4006: "(z,z0)P6"
+    4001: "(n,el)P₁",
+    4002: "(n,el)P₂",
+    4003: "(n,el)P₃",
+    4004: "(n,el)P₄",
+    4005: "(n,el)P₅",
+    4006: "(n,el)P₆",
 }
+
+
+def zaid_to_element(zaid):
+    """
+    Convert ZAID (e.g., 26056 or "26056.70c") to element format (e.g., "Fe56").
+
+    Parameters
+    ----------
+    zaid : int or str
+        ZAID in format ZZZAAA or "ZZZAAA.XXc"
+
+    Returns
+    -------
+    str
+        Element format like "Fe56", "U235", "H-nat" for natural abundance
+    """
+    # Handle string ZAIDs with temperature suffix
+    zaid_str = str(zaid)
+    zaid_num = int(zaid_str.split('.')[0])
+
+    z = zaid_num // 1000
+    a = zaid_num % 1000
+
+    symbol = ATOMIC_NUMBER_TO_SYMBOL.get(z, f"Z{z}")
+
+    if a == 0:
+        return f"{symbol}-nat"
+    return f"{symbol}{a}"
+
+
+def mt_to_reaction(mt):
+    """
+    Get the reaction name for an MT number.
+
+    Parameters
+    ----------
+    mt : int
+        MT reaction number
+
+    Returns
+    -------
+    str
+        Reaction name like "(n,el)", "(n,γ)", or "MT{mt}" if not found
+    """
+    return MT_TO_REACTION.get(mt, f"MT{mt}")
+
+
+def format_plot_label(zaid=None, isotope=None, mt=None, order=None, energy=None):
+    """
+    Format a consistent plot label for nuclear data.
+
+    Parameters
+    ----------
+    zaid : int or str, optional
+        ZAID number (will be converted to element format)
+    isotope : str, optional
+        Isotope name (takes precedence over zaid)
+    mt : int, optional
+        MT reaction number
+    order : int, optional
+        Legendre order (for angular distributions)
+    energy : float, optional
+        Energy in MeV (for angular distributions)
+
+    Returns
+    -------
+    str
+        Formatted label like "Fe56 (n,el)", "Fe56 (n,el) L=1", "Fe56 (n,el) @ 1.0 MeV"
+    """
+    # Get element/isotope name
+    if isotope:
+        element = isotope
+    elif zaid:
+        element = zaid_to_element(zaid)
+    else:
+        element = "Unknown"
+
+    # Build label parts
+    parts = [element]
+
+    if mt is not None:
+        reaction = mt_to_reaction(mt)
+        parts.append(reaction)
+
+    if order is not None:
+        parts.append(f"L={order}")
+
+    if energy is not None:
+        parts.append(f"@ {energy} MeV")
+
+    return " ".join(parts)
 
 
 ENDF_MAT_TO_ZAID = {

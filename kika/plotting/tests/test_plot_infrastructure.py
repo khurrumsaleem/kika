@@ -302,7 +302,6 @@ class TestPlotBuilder:
             matrix_type="corr",
             block_info=block_info,
             energy_grid=energy_edges,
-            show_energy_ticks=False,
             mt_labels=["2"],
             is_diagonal=True,
             scale="log",

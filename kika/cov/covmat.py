@@ -36,6 +36,8 @@ class CovMat:
         List of column reaction MT numbers
     matrices : List[np.ndarray]
         List of covariance matrices (one for each row-column combination)
+    energy_unit : str
+        Energy unit for energy_grid: 'eV' (default) or 'MeV'
     """
     num_groups: int = 0
     energy_grid: Optional[List[float]] = None 
@@ -45,6 +47,7 @@ class CovMat:
     reaction_cols: List[int] = field(default_factory=list)
     matrices: List[np.ndarray] = field(default_factory=list)
     cross_sections: Dict[Tuple[int, int], np.ndarray] = field(default_factory=dict)
+    energy_unit: str = 'eV'  # Energy unit: 'eV' or 'MeV'
 
 
     # ------------------------------------------------------------------
@@ -95,9 +98,12 @@ class CovMat:
         self.isotope_cols.append(isotope_col)
         self.reaction_cols.append(reaction_col)
         self.matrices.append(matrix)
+
+        # Invalidate cached adjacency graph (if any)
+        self._invalidate_cov_graph_cache()
     
     @classmethod
-    def from_gendf(cls, file_path: Union[str, 'Path']) -> "CovMat":
+    def from_gendf(cls, file_path: Union[str, 'Path'], energy_unit: str = 'eV') -> "CovMat":
         """
         Create a CovMat instance from an NJOY-generated GENDF covariance file.
         
@@ -108,6 +114,8 @@ class CovMat:
         ----------
         file_path : str or Path
             Path to the GENDF covariance file
+        energy_unit : str, optional
+            Energy unit for the energy grid: 'eV' (default) or 'MeV'
             
         Returns
         -------
@@ -118,6 +126,8 @@ class CovMat:
         --------
         >>> covmat = CovMat.from_gendf('path/to/file.gendf')
         >>> print(f"Loaded {covmat.num_matrices} matrices")
+        >>> # Or specify MeV if the file uses MeV
+        >>> covmat_mev = CovMat.from_gendf('path/to/file.gendf', energy_unit='MeV')
         
         See Also
         --------
@@ -129,7 +139,7 @@ class CovMat:
         # Convert to Path object for consistent handling
         file_path = Path(file_path)
         
-        return read_njoy_covmat(file_path)
+        return read_njoy_covmat(file_path, energy_unit=energy_unit)
     
     def remove_matrix(
         self,
@@ -825,7 +835,6 @@ class CovMat:
         self,
         nuclide: Union[int, str, Sequence[Union[int, str]]],
         mt:   Union[int, Sequence[int]],
-        ax: plt.Axes = None,
         *,
         energy_range: Optional[Tuple[float, float]] = None,
         style: str = 'default',
@@ -864,7 +873,7 @@ class CovMat:
     
     def to_plot_data(
         self,
-        zaid: int,
+        nuclide: Union[int, str],
         mt: int,
         sigma: float = 1.0,
         label: str = None,
@@ -878,8 +887,10 @@ class CovMat:
         
         Parameters
         ----------
-        zaid : int
-            Isotope identifier (ZAID)
+        nuclide : int or str
+            Isotope identifier. Can be either:
+            - Integer ZAID (e.g., 92235 for U-235)
+            - Element-mass string (e.g., 'U235', 'Fe56')
         mt : int
             Reaction MT number
         sigma : float, optional
@@ -898,13 +909,14 @@ class CovMat:
         Raises
         ------
         ValueError
-            If the specified (zaid, mt) pair is not found in either cross sections or covariance data
+            If the specified (nuclide, mt) pair is not found in either cross sections or covariance data
             
         Examples
         --------
-        >>> # Extract data
+        >>> # Extract data - both integer ZAID and string notation work
         >>> covmat = read_njoy_covmat('file.gendf')
-        >>> xs_data, unc_data = covmat.to_plot_data(zaid=26056, mt=2)
+        >>> xs_data, unc_data = covmat.to_plot_data(nuclide=26056, mt=2)
+        >>> xs_data, unc_data = covmat.to_plot_data(nuclide='Fe56', mt=2)
         >>> 
         >>> # Use with PlotBuilder:
         >>> from kika.plotting import PlotBuilder
@@ -919,7 +931,13 @@ class CovMat:
         >>> fig3 = PlotBuilder().add_data(unc_data).build()
         """
         from kika.plotting import MultigroupUncertaintyPlotData
-        from kika._utils import zaid_to_symbol
+        from kika._utils import zaid_to_symbol, symbol_to_zaid
+        
+        # Convert nuclide to ZAID if string
+        if isinstance(nuclide, str):
+            zaid = symbol_to_zaid(nuclide)
+        else:
+            zaid = nuclide
         
         # Extract cross section data (will add sigma notation to label if uncertainties exist)
         xs_data = self._extract_xs_data(zaid, mt, label, sigma, **styling_kwargs)
@@ -1052,7 +1070,6 @@ class CovMat:
         mt: Union[int, Sequence[int], Tuple[int, int]],
         *,
         matrix_type: str = 'corr',
-        show_energy_ticks: bool = True,
         scale: str = 'log',
         energy_range: Optional[Tuple[float, float]] = None,
         **kwargs
@@ -1078,8 +1095,6 @@ class CovMat:
         matrix_type : str, default 'corr'
             Type of matrix: 'corr'/'correlation' for correlation matrix,
             or 'cov'/'covariance' for covariance matrix
-        show_energy_ticks : bool, default True
-            Whether to enable energy group tick marks
         scale : str, default 'log'
             Energy axis scale: 'log'/'logarithmic' or 'lin'/'linear'
         energy_range : tuple of float, optional
@@ -1314,7 +1329,6 @@ class CovMat:
             block_info=block_info,
             uncertainty_data=uncertainty_data,
             energy_grid=energy_grid,
-            show_energy_ticks=show_energy_ticks,
             mt_labels=[str(m) for m in mts],
             is_diagonal=is_diagonal,
             mask_value=mask_value,
@@ -1347,7 +1361,6 @@ class CovMat:
         vmax: float = None,
         vmin: float = None,
         show_uncertainties: bool = True,
-        show_energy_ticks: bool = True,
         scale: str = "log",
         energy_range: Optional[Tuple[float, float]] = None,
         title: Optional[str] = "default",
@@ -1385,8 +1398,6 @@ class CovMat:
             Color scale limits
         show_uncertainties : bool
             Whether to show uncertainty plots above the heatmap
-        show_energy_ticks : bool
-            Whether to show energy group ticks and labels on the heatmap axes
         scale : str, default "log"
             Energy axis scale: "log"/"logarithmic" or "lin"/"linear"
         energy_range : tuple of float, optional
@@ -1415,7 +1426,6 @@ class CovMat:
             vmax=vmax,
             vmin=vmin,
             show_uncertainties=show_uncertainties,
-            show_energy_ticks=show_energy_ticks,
             scale=scale,
             energy_range=energy_range,
             title=title,
@@ -2043,6 +2053,245 @@ class CovMat:
             energy_bins=energy_bins,
             **styling_kwargs
         )
+
+
+
+
+
+
+    # ------------------------------------------------------------------
+    # Graph / UI helper methods (covariance connectivity)
+    # ------------------------------------------------------------------
+
+    def _invalidate_cov_graph_cache(self) -> None:
+        """Invalidate any cached covariance connectivity graphs."""
+        if hasattr(self, "_cov_graph_cache"):
+            self._cov_graph_cache = {}
+
+    @staticmethod
+    def _node_id(zaid: int, mt: int) -> str:
+        """Stable string id for frontend graphs."""
+        from kika._utils import zaid_to_symbol
+        nuclide = zaid_to_symbol(int(zaid))
+        return f"{nuclide}:{int(mt)}"
+
+    def _normalize_nuclide(self, nuclide: Union[int, str]) -> int:
+        """Accept ZAID int or symbol string like 'Fe56'."""
+        if isinstance(nuclide, str):
+            from kika._utils import symbol_to_zaid
+            return int(symbol_to_zaid(nuclide))
+        return int(nuclide)
+
+    def _node_info(self, zaid: int, mt: int, *, degree: Optional[int] = None) -> Dict[str, Any]:
+        """JSON-friendly node payload."""
+        # Reaction label is stable from constants; isotope label is best-effort.
+        from kika._utils import zaid_to_symbol
+        
+        reaction_label = MT_TO_REACTION.get(int(mt), f"MT={int(mt)}")
+        nuclide = zaid_to_symbol(int(zaid))
+
+        out = {
+            "id": self._node_id(zaid, mt),
+            "nuclide": nuclide,  # Use nuclide (e.g., "Fe56") instead of ZAID
+            "mt": int(mt),
+            "reaction_label": reaction_label,
+        }
+        if degree is not None:
+            out["degree"] = int(degree)
+        return out
+
+    def _cov_adjacency(
+        self,
+        *,
+        require_nonzero: bool = True,
+        tol: float = 0.0,
+    ) -> Dict[Tuple[int, int], Set[Tuple[int, int]]]:
+        """
+        Build (or fetch cached) undirected adjacency mapping:
+            (zaid, mt) -> set of connected (zaid, mt)
+
+        Connectivity rule:
+        - If a covariance block exists between the two nodes AND
+          (require_nonzero => the block has any |value| > tol),
+          then we add an edge.
+        """
+        key = (bool(require_nonzero), float(tol))
+
+        cache: Dict[Tuple[bool, float], Dict[Tuple[int, int], Set[Tuple[int, int]]]] = getattr(self, "_cov_graph_cache", {})
+        if key in cache:
+            return cache[key]
+
+        adj: Dict[Tuple[int, int], Set[Tuple[int, int]]] = defaultdict(set)
+
+        for ir, rr, ic, rc, M in zip(
+            self.isotope_rows,
+            self.reaction_rows,
+            self.isotope_cols,
+            self.reaction_cols,
+            self.matrices,
+        ):
+            a = (int(ir), int(rr))
+            b = (int(ic), int(rc))
+
+            if require_nonzero:
+                # "At least one covariance element" -> any non-zero entry in the block
+                # tol lets you ignore numerical noise.
+                if not np.any(np.abs(M) > tol):
+                    continue
+
+            if a == b:
+                # ensure node exists even if only diagonal blocks exist
+                _ = adj[a]
+                continue
+
+            adj[a].add(b)
+            adj[b].add(a)
+
+        # Save cache
+        cache[key] = adj
+        self._cov_graph_cache = cache
+        return adj
+
+    def list_cov_nodes(
+        self,
+        *,
+        require_nonzero: bool = False,
+        tol: float = 0.0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Return all nodes (zaid, mt) known to the covariance store.
+        If require_nonzero=True, nodes are restricted to those that participate
+        in at least one non-zero block (or have a non-zero diagonal block).
+        """
+        adj = self._cov_adjacency(require_nonzero=require_nonzero, tol=tol)
+
+        # If require_nonzero=False, adjacency might not include isolated nodes.
+        # In that case, fall back to the param-pair registry.
+        if not require_nonzero:
+            pairs = self._get_param_pairs()
+            nodes = sorted({(int(z), int(m)) for (z, m) in pairs}, key=lambda x: (x[0], x[1]))
+            return [self._node_info(z, m, degree=len(adj.get((z, m), set()))) for z, m in nodes]
+
+        nodes = sorted(adj.keys(), key=lambda x: (x[0], x[1]))
+        return [self._node_info(z, m, degree=len(adj.get((z, m), set()))) for z, m in nodes]
+
+    def get_cov_connections(
+        self,
+        nuclide: Union[int, str],
+        mt: int,
+        *,
+        depth: int = 1,
+        require_nonzero: bool = True,
+        tol: float = 0.0,
+        max_neighbors: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Main method for your UI graph.
+
+        Returns a JSON-friendly payload with:
+        - center node
+        - nodes + edges within BFS depth
+        - (if depth >= 2) a grouped mapping of second-level nodes per first-level neighbor,
+          ideal for your "mini nodes next to each neighbor".
+
+        Parameters
+        ----------
+        depth : int
+            1 -> show center + its neighbors
+            2 -> also include neighbors-of-neighbors
+        require_nonzero : bool
+            True: only create edges if the covariance block has any |value| > tol
+            False: edge exists if the block exists (even if all zeros)
+        tol : float
+            Threshold for nonzero detection when require_nonzero=True
+        max_neighbors : Optional[int]
+            If set, cap the number of neighbors expanded per node (safety for huge graphs)
+        """
+        zaid = self._normalize_nuclide(nuclide)
+        mt = int(mt)
+        start = (zaid, mt)
+
+        adj = self._cov_adjacency(require_nonzero=require_nonzero, tol=tol)
+
+        # Validate node existence (prefer using registry of pairs)
+        pairs = set((int(z), int(m)) for (z, m) in self._get_param_pairs())
+        if start not in pairs and start not in adj:
+            # helpful error for UI
+            available = sorted({m for (z, m) in pairs if z == zaid})
+            raise ValueError(f"(ZAID={zaid}, MT={mt}) not found. Available MTs for this ZAID: {available}")
+
+        # BFS up to depth
+        visited: Set[Tuple[int, int]] = {start}
+        edges: Set[Tuple[str, str]] = set()
+
+        layer1: List[Tuple[int, int]] = []
+        layer2_by_neighbor: Dict[str, List[Tuple[int, int]]] = {}
+
+        frontier = [start]
+        for d in range(depth):
+            next_frontier: List[Tuple[int, int]] = []
+            for u in frontier:
+                nbrs = list(adj.get(u, set()))
+                # deterministic ordering: same result each call
+                nbrs.sort(key=lambda x: (x[0], x[1]))
+                if max_neighbors is not None:
+                    nbrs = nbrs[: int(max_neighbors)]
+
+                for v in nbrs:
+                    su = self._node_id(*u)
+                    sv = self._node_id(*v)
+                    a, b = (su, sv) if su < sv else (sv, su)
+                    edges.add((a, b))
+
+                    if v not in visited:
+                        visited.add(v)
+                        next_frontier.append(v)
+
+                # Capture layer1 explicitly
+                if d == 0:
+                    layer1 = nbrs
+
+            frontier = next_frontier
+            if not frontier:
+                break
+
+        # Build the grouped second-level map (for your “mini nodes next to each neighbor”)
+        if depth >= 2:
+            for n in layer1:
+                n_id = self._node_id(*n)
+                second = sorted(adj.get(n, set()) - {start}, key=lambda x: (x[0], x[1]))
+                if max_neighbors is not None:
+                    second = second[: int(max_neighbors)]
+                layer2_by_neighbor[n_id] = second
+
+        # Serialize nodes + edges
+        all_nodes = sorted(visited, key=lambda x: (x[0], x[1]))
+        nodes_payload = [
+            self._node_info(z, m, degree=len(adj.get((z, m), set())))
+            for (z, m) in all_nodes
+        ]
+        edges_payload = [{"source": a, "target": b} for (a, b) in sorted(edges)]
+
+        payload: Dict[str, Any] = {
+            "center": self._node_info(*start, degree=len(adj.get(start, set()))),
+            "nodes": nodes_payload,
+            "edges": edges_payload,
+            "depth": int(depth),
+            "require_nonzero": bool(require_nonzero),
+            "tol": float(tol),
+            "layer1": [self._node_id(*p) for p in layer1],
+        }
+
+        if depth >= 2:
+            payload["layer2_by_neighbor"] = {
+                nid: [self._node_id(*p) for p in plist]
+                for nid, plist in layer2_by_neighbor.items()
+            }
+
+        return payload
+
+
+
 
 
     #------------------------------------------------------------------

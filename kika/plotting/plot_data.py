@@ -462,12 +462,9 @@ class HeatmapPlotData:
         Bin edges for y-axis (for pcolormesh)
     cmap : str or colormap
         Colormap name or instance
-    vmin : float, optional
-        Minimum value for color scale
-    vmax : float, optional
-        Maximum value for color scale
     norm : matplotlib.colors.Normalize, optional
-        Custom normalization (e.g., TwoSlopeNorm for diverging colormaps)
+        Custom normalization (e.g., TwoSlopeNorm for diverging colormaps).
+        If not provided, auto-scaling is used.
     colorbar_label : str, optional
         Label for the colorbar
     colorbar_position : str
@@ -486,8 +483,6 @@ class HeatmapPlotData:
     x_edges: Optional[np.ndarray] = None
     y_edges: Optional[np.ndarray] = None
     cmap: Union[str, Any] = "viridis"
-    vmin: Optional[float] = None
-    vmax: Optional[float] = None
     norm: Optional[Any] = None
     colorbar_label: Optional[str] = None
     colorbar_position: str = "right"
@@ -541,9 +536,7 @@ class CovarianceHeatmapData(HeatmapPlotData):
         Uncertainty values for optional panels above heatmap
         Format: {mt: sigma_percent_array} where sigma_percent_array has length G
     energy_grid : np.ndarray, optional
-        Energy bin boundaries (length G+1)
-    show_energy_ticks : bool
-        Whether to show energy group tick marks and labels
+        Energy bin boundaries (length G+1) for automatic energy tick display
     mt_labels : list of str, optional
         Custom labels for MT reactions (defaults to "MT {number}")
     is_diagonal : bool
@@ -554,7 +547,6 @@ class CovarianceHeatmapData(HeatmapPlotData):
     block_info: Optional[Dict[str, Any]] = None
     uncertainty_data: Optional[Dict[int, np.ndarray]] = None
     energy_grid: Optional[np.ndarray] = None
-    show_energy_ticks: bool = True
     mt_labels: Optional[List[str]] = None
     is_diagonal: bool = True
     scale: str = "log"
@@ -618,10 +610,8 @@ class MF34HeatmapData(HeatmapPlotData):
         Uncertainty values for optional panels
         Format: {L: sigma_percent_array[G_L]}
     energy_grids : dict, optional
-        Energy bin boundaries per Legendre coefficient
+        Energy bin boundaries per Legendre coefficient for automatic energy tick display
         Format: {L: energy_grid[G_L+1]}
-    show_energy_ticks : bool
-        Whether to show energy ticks with proper scaling
     is_diagonal : bool
         Whether diagonal blocks (L vs L) or off-diagonal (L1 vs L2)
     """
@@ -633,7 +623,6 @@ class MF34HeatmapData(HeatmapPlotData):
     block_info: Optional[Dict[str, Any]] = None
     uncertainty_data: Optional[Dict[int, np.ndarray]] = None
     energy_grids: Optional[Dict[int, np.ndarray]] = None
-    show_energy_ticks: bool = True
     is_diagonal: bool = True
     
     def __post_init__(self):

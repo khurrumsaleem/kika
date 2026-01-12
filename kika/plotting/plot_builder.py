@@ -6,6 +6,9 @@ and creates publication-quality plots with consistent styling.
 """
 
 from typing import List, Optional, Tuple, Union, Dict, Any
+
+# Sentinel value to distinguish "not set" from "explicitly set to None"
+_NOT_SET = object()
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import numpy as np
@@ -149,7 +152,7 @@ class PlotBuilder:
         # Plot configuration
         self._x_label: Optional[str] = None
         self._y_label: Optional[str] = None
-        self._title: Optional[str] = None
+        self._title = _NOT_SET  # Use sentinel to distinguish "not set" from "explicitly None"
         self._legend_loc: str = 'best'
         self._use_log_x: bool = False
         self._use_log_y: bool = False
@@ -329,34 +332,42 @@ class PlotBuilder:
     
     def set_labels(
         self,
-        title: Optional[str] = None,
+        title = _NOT_SET,
         x_label: Optional[str] = None,
         y_label: Optional[str] = None
     ) -> 'PlotBuilder':
         """
         Set plot labels.
-        
+
         Parameters
         ----------
         title : str, optional
-            Plot title
+            Plot title. Use a string to set a custom title, or pass None or ""
+            to explicitly hide the title. If not provided, the default title
+            (e.g., from heatmap_data.label) will be used.
         x_label : str, optional
             X-axis label
         y_label : str, optional
             Y-axis label
-            
+
         Returns
         -------
         PlotBuilder
             Self for method chaining
+
+        Examples
+        --------
+        >>> builder.set_labels(title="My Custom Title")  # Custom title
+        >>> builder.set_labels(title="")  # Hide title
+        >>> builder.set_labels(title=None)  # Hide title
         """
-        if title is not None:
+        if title is not _NOT_SET:
             self._title = title
         if x_label is not None:
             self._x_label = x_label
         if y_label is not None:
             self._y_label = y_label
-        
+
         return self
     
     def set_scales(
@@ -391,12 +402,15 @@ class PlotBuilder:
         """
         Set axis limits.
         
+        For covariance/correlation heatmaps (symmetric matrices), if only one limit
+        is provided, it will be applied to both axes to maintain symmetry.
+        
         Parameters
         ----------
         x_lim : tuple, optional
-            (min, max) for x-axis
+            (min, max) for x-axis. For symmetric matrices, also applied to y-axis if y_lim is None.
         y_lim : tuple, optional
-            (min, max) for y-axis
+            (min, max) for y-axis. For symmetric matrices, also applied to x-axis if x_lim is None.
             
         Returns
         -------
@@ -574,10 +588,11 @@ class PlotBuilder:
     ) -> 'PlotBuilder':
         """
         Add heatmap data to be rendered when build() is called.
-        
-        This method stores heatmap data for rendering, following the builder pattern
-        consistently with add_data(). Call build() to generate the figure.
-        
+
+        .. deprecated::
+            This method is deprecated. Use HeatmapBuilder instead for more
+            control over heatmap formatting options.
+
         Parameters
         ----------
         heatmap_data : HeatmapPlotData
@@ -587,40 +602,35 @@ class PlotBuilder:
         **styling_overrides
             Styling overrides for heatmap rendering. Common options:
             - cmap : str or Colormap - Override colormap (e.g., 'viridis', 'RdBu_r')
-            - vmin : float - Minimum value for colormap normalization
-            - vmax : float - Maximum value for colormap normalization
-            - norm : Normalize - Custom normalization (overrides vmin/vmax)
+            - norm : Normalize - Custom normalization
             - colorbar_label : str - Override colorbar label
-            
+
         Returns
         -------
         PlotBuilder
-            Self for method chaining
-            
+            Self for method chaining (returns HeatmapBuilder internally)
+
         Notes
         -----
-        Heatmaps and line plots are mutually exclusive. You cannot mix add_data() and
-        add_heatmap() on the same PlotBuilder instance. Calling add_heatmap() after
-        add_data() (or vice versa) will raise a ValueError.
-        
-        Calling add_heatmap() multiple times will overwrite the previous heatmap data.
-        
-        Examples
-        --------
-        >>> # Basic usage
-        >>> from kika.plotting import PlotBuilder
-        >>> heatmap_data = covmat.to_heatmap_data(nuclide=92235, mt=[2, 18])
-        >>> builder = PlotBuilder(style='light')
-        >>> builder.add_heatmap(heatmap_data)
-        >>> builder.set_labels(title='Custom Title')
-        >>> fig = builder.build()
-        
-        >>> # With method chaining
-        >>> fig = (PlotBuilder(style='light')
-        ...        .add_heatmap(heatmap_data, cmap='plasma', show_uncertainties=False)
-        ...        .set_labels(title='Correlation Matrix', x_label='MT', y_label='MT')
-        ...        .build())
+        This method is deprecated. Please use HeatmapBuilder directly for
+        more control over formatting:
+
+        >>> from kika.plotting import HeatmapBuilder
+        >>> fig = HeatmapBuilder().add_heatmap(
+        ...     heatmap_data,
+        ...     show_energy_ticks=True,
+        ...     show_block_labels=True,
+        ...     energy_tick_fontsize=10
+        ... ).build()
         """
+        import warnings
+        warnings.warn(
+            "PlotBuilder.add_heatmap() is deprecated. Use HeatmapBuilder instead "
+            "for more control over heatmap formatting options.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+
         # Check for conflicts with line plot data
         if self._data_list:
             raise ValueError(
@@ -628,181 +638,400 @@ class PlotBuilder:
                 "add_heatmap() cannot be called after add_data(). "
                 "Create separate PlotBuilder instances for heatmaps and line plots."
             )
-        
+
         # Store heatmap data for rendering in build()
         self._heatmap_data = heatmap_data
         self._heatmap_show_uncertainties = show_uncertainties
         self._heatmap_styling_overrides = styling_overrides
-        
+
         return self
     
     def _build_heatmap(self) -> plt.Figure:
         """
         Internal method to render heatmap. Called by build() when heatmap data is present.
-        
+
+        This method delegates to HeatmapBuilder for the actual rendering.
+
         Returns
         -------
         matplotlib.figure.Figure
             The completed heatmap figure
         """
-        # Get stored heatmap data
-        heatmap_data = self._heatmap_data
-        show_uncertainties = self._heatmap_show_uncertainties
-        styling_overrides = self._heatmap_styling_overrides
-        
-        from .plot_data import CovarianceHeatmapData, MF34HeatmapData, HeatmapPlotData
-        from .heatmap_utils import (
-            setup_energy_group_ticks,
-            setup_energy_group_ticks_single_block,
-            format_uncertainty_ticks,
-            add_mt_labels_to_heatmap
-        )
-        from matplotlib.gridspec import GridSpec
-        from matplotlib.colors import TwoSlopeNorm
-        
-        # For heatmaps, use manual formatting instead of style system
-        # The old implementation did this to avoid issues with heatmap tick/label positioning
-        plt.rcdefaults()
+        from .heatmap_builder import HeatmapBuilder
+
+        # Create HeatmapBuilder with same settings
         figsize = getattr(self, "_figsize_user", None) or self.figsize
         dpi = getattr(self, "_dpi_user", None) or self.dpi
 
-        plt.rcParams.update({
-            'font.family': self.font_family,
-            'font.size': 12,
-            'axes.labelsize': 14,
-            'axes.titlesize': 14,
-            'xtick.labelsize': 11,
-            'ytick.labelsize': 11,
-            'legend.fontsize': 12,
-            'figure.figsize': figsize,
-            'figure.dpi': dpi,
-            'axes.linewidth': 1.2,
-            'lines.linewidth': 2.2,
-            'lines.markersize': 7,
-            'axes.grid': False,
-            'axes.facecolor': 'white',
-            'figure.facecolor': 'white',
-            'savefig.facecolor': 'white',
-            'figure.constrained_layout.use': False,
-        })
-
-        # Close any pre-existing figure created during __init__ to avoid blank displays in notebooks
-        if hasattr(self, "fig") and getattr(self, "ax", None) is not None:
-            try:
-                plt.close(self.fig)
-            except Exception:
-                pass
-            self.fig = None
-            self.ax = None
-        
-        # Determine if we have uncertainty data to show
-        has_uncertainties = (
-            show_uncertainties and
-            hasattr(heatmap_data, 'uncertainty_data') and
-            heatmap_data.uncertainty_data is not None and
-            len(heatmap_data.uncertainty_data) > 0
+        builder = HeatmapBuilder(
+            style=self.style,
+            figsize=figsize,
+            dpi=dpi,
+            font_family=self.font_family,
+            notebook_mode=self._notebook_mode,
+            interactive=self._interactive,
         )
 
-        # Pre-compute helper to translate energy limits into heatmap axes coordinates
-        symmetric_matrix = isinstance(heatmap_data, (CovarianceHeatmapData, MF34HeatmapData)) \
-            and getattr(heatmap_data, "is_diagonal", False)
-        x_edges_for_limits = getattr(heatmap_data, "x_edges", None)
-        y_edges_for_limits = getattr(heatmap_data, "y_edges", None)
-        extent = getattr(heatmap_data, "extent", None)
-        if x_edges_for_limits is None and extent is not None:
-            x_edges_for_limits = np.asarray(extent[:2], dtype=float)
-        if y_edges_for_limits is None and extent is not None:
-            y_edges_for_limits = np.asarray(extent[2:], dtype=float)
+        # Transfer title if explicitly set (including None or empty string to hide)
+        if self._title is not _NOT_SET:
+            builder.set_labels(title=self._title)
 
-        def _transform_energy_value(val: float) -> float:
-            """Map raw energy values onto the transformed axis used by the heatmap."""
-            if getattr(heatmap_data, "scale", None) == "log":
-                return float(np.log10(max(float(val), 1e-300)))
-            return float(val)
+        # Transfer limits if set
+        if self._x_lim is not None or self._y_lim is not None:
+            builder.set_limits(x_lim=self._x_lim, y_lim=self._y_lim)
 
-        def _convert_limits_to_axis(
-            lim: Optional[Tuple[float, float]],
-            axis_edges: Optional[np.ndarray]
-        ) -> Optional[Tuple[float, float]]:
-            """Convert user-provided energy limits into the heatmap axis coordinates."""
-            if lim is None or axis_edges is None:
-                return lim
-
-            energy_grid = getattr(heatmap_data, "energy_grid", None)
-            if energy_grid is None or len(energy_grid) == 0:
-                return lim
-
-            axis_edges = np.asarray(axis_edges, dtype=float)
-            energy_edges = np.asarray(energy_grid, dtype=float)
-
-            transformed_edges = np.asarray([_transform_energy_value(v) for v in energy_edges], dtype=float)
-            base_span = transformed_edges[-1] - transformed_edges[0]
-            axis_span = axis_edges[-1] - axis_edges[0]
-
-            # Only attempt conversion when the axis spans a single block (no concatenated MT/L sections)
-            if not (np.isfinite(base_span) and np.isfinite(axis_span)) or base_span <= 0 or axis_span <= 0:
-                return lim
-            if axis_span > base_span * 1.05:
-                return lim
-
-            offset = axis_edges[0]
-            base0 = transformed_edges[0]
-            return (
-                _transform_energy_value(lim[0]) - base0 + offset,
-                _transform_energy_value(lim[1]) - base0 + offset,
+        # Transfer font sizes if set
+        if self._title_fontsize is not None or self._tick_labelsize is not None:
+            builder.set_font_sizes(
+                title=self._title_fontsize,
+                ticks=self._tick_labelsize
             )
 
-        resolved_x_lim = _convert_limits_to_axis(getattr(self, "_x_lim", None), x_edges_for_limits)
-        resolved_y_lim = _convert_limits_to_axis(getattr(self, "_y_lim", None), y_edges_for_limits)
-        if symmetric_matrix and resolved_y_lim is None and resolved_x_lim is not None:
-            resolved_y_lim = resolved_x_lim
+        # Add heatmap data and build
+        builder.add_heatmap(
+            self._heatmap_data,
+            show_uncertainties=self._heatmap_show_uncertainties,
+            **self._heatmap_styling_overrides
+        )
+
+        return builder.build()
+
+    # NOTE: The following heatmap helper methods are deprecated.
+    # Heatmap functionality has been moved to HeatmapBuilder class in heatmap_builder.py.
+    # These methods are kept for backward compatibility but will not be called
+    # since _build_heatmap() now delegates to HeatmapBuilder.
+
+    def _setup_mf34_heatmap_ticks(
+        self,
+        fig: plt.Figure,
+        ax: plt.Axes,
+        data: 'MF34HeatmapData',
+        full_xlim: Tuple[float, float],
+        full_ylim: Tuple[float, float]
+    ) -> None:
+        """
+        Setup ticks for MF34 angular distribution heatmap with Legendre labels and energy axes.
         
-        # Create figure and layout
-        fig = plt.figure(figsize=figsize, dpi=dpi)
-        
-        if has_uncertainties:
-            # GridSpec with 2 rows: uncertainty panels (top) + heatmap (bottom)
-            num_panels = len(heatmap_data.uncertainty_data)
-            # Adjust figure height to accommodate uncertainty panels (multiply by 1.18)
-            fig.set_size_inches(figsize[0], figsize[1] * 1.18)
-            gs = GridSpec(2, num_panels if num_panels > 1 else 1, figure=fig,
-                         height_ratios=[0.16, 1], hspace=0.08, wspace=0.02)
+        Primary axes show Legendre order labels using figure-fixed positioning.
+        Secondary axes (top/right) show energy tick marks.
+        """
+        import numpy as np
+
+        block_info = data.block_info or {}
+        legendre_list = block_info.get('legendre_coeffs', data.legendre_coeffs)
+        ranges_idx = block_info.get('ranges', {}) or {}
+        energy_ranges = block_info.get('energy_ranges', {}) or {}
+        legendre_labels = [str(l) for l in legendre_list]  # Format as 1, 2, etc.
+
+        # Legendre labels using figure-fixed positioning (like MT labels)
+        if data.is_diagonal:
+            centers = []
+            labels = []
+            for i, l_val in enumerate(legendre_list):
+                rng = energy_ranges.get(l_val) or ranges_idx.get(l_val)
+                if rng:
+                    centers.append((rng[0] + rng[1]) * 0.5)
+                    labels.append(legendre_labels[i])
+            if centers:
+                # Use figure-fixed labels instead of axis ticks
+                ax.set_xticks([])
+                ax.set_yticks([])
+                self._add_block_labels_figure_fixed(
+                    fig, ax, centers, labels, full_xlim, full_ylim,
+                    x_axis_label="Legendre Order", y_axis_label="Legendre Order"
+                )
+        elif len(legendre_list) >= 2:
+            # For off-diagonal blocks, still use figure-fixed approach
+            row_l = legendre_list[0]
+            col_l = legendre_list[1] if len(legendre_list) > 1 else legendre_list[0]
+            x_rng = energy_ranges.get(col_l) or ranges_idx.get(col_l)
+            y_rng = energy_ranges.get(row_l) or ranges_idx.get(row_l)
             
-            # Create uncertainty axes
-            uncertainty_axes = []
-            if num_panels == 1:
-                ax_unc = fig.add_subplot(gs[0, :])
-                uncertainty_axes.append(ax_unc)
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+            if x_rng:
+                x_centers = [(x_rng[0] + x_rng[1]) * 0.5]
+                x_labels = [str(col_l)]
+                self._add_block_labels_figure_fixed(
+                    fig, ax, x_centers, x_labels, full_xlim, full_ylim,
+                    x_axis_label="Legendre Order", y_axis_label="Legendre Order"
+                )
+            if y_rng:
+                y_centers = [(y_rng[0] + y_rng[1]) * 0.5]
+                y_labels = [str(row_l)]
+                self._add_block_labels_figure_fixed(
+                    fig, ax, y_centers, y_labels, full_xlim, full_ylim,
+                    x_axis_label="Legendre Order", y_axis_label="Legendre Order"
+                )
+
+        # Add energy ticks on secondary axes if energy grids available
+        if data.energy_grids is not None and len(data.energy_grids) > 0:
+            # Use multi-block energy ticks if there are multiple Legendre orders with coordinate ranges
+            if len(legendre_list) > 1 and energy_ranges:
+                # Build block_ranges dict from energy_ranges
+                block_ranges_dict = {}
+                for l_val in legendre_list:
+                    rng = energy_ranges.get(l_val) or ranges_idx.get(l_val)
+                    if rng is not None:
+                        block_ranges_dict[l_val] = tuple(rng)
+                if block_ranges_dict:
+                    self._add_multi_block_energy_ticks(ax, data.energy_grids, block_ranges_dict, data.scale)
+                else:
+                    first_grid = next(iter(data.energy_grids.values()))
+                    self._add_energy_ticks(ax, first_grid, data.scale)
             else:
-                for i in range(num_panels):
-                    ax_unc = fig.add_subplot(gs[0, i])
-                    uncertainty_axes.append(ax_unc)
+                # Single block - use first available energy grid for tick placement
+                first_grid = next(iter(data.energy_grids.values()))
+                self._add_energy_ticks(ax, first_grid, data.scale)
+    
+    def _add_energy_ticks(self, ax: plt.Axes, energy_grid: np.ndarray, scale: str = 'log') -> None:
+        """
+        Add energy tick marks on secondary (top/right) axes in transformed coordinates.
+        
+        The heatmap is displayed in transformed coordinate space. For log scale, coordinates
+        are log10(energy) - log10(e_min), shifted to start at 0. Energy ticks must account
+        for this transformation.
+        
+        Parameters
+        ----------
+        ax : plt.Axes
+            Primary heatmap axes (already in transformed coordinates)
+        energy_grid : np.ndarray
+            Energy bin boundaries (in original eV units)
+        scale : str
+            'log' or 'linear' scaling
+        """
+        import numpy as np
+        from matplotlib.ticker import FuncFormatter, FixedLocator
+        
+        # Create secondary axes for energy ticks
+        ax_top = ax.twiny()
+        ax_right = ax.twinx()
+        
+        # Get the axes limits (these are in transformed space)
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        
+        if scale == 'log':
+            # Energy grid is in eV, heatmap coordinates are log10(eV) - log10(e_min)
+            e_min, e_max = energy_grid.min(), energy_grid.max()
+            log_e_min = np.log10(np.maximum(e_min, 1e-300))
+            log_e_max = np.log10(e_max)
             
-            # Create heatmap axes (spans all columns)
-            ax_heatmap = fig.add_subplot(gs[1, :])
+            # Heatmap coordinates are shifted: coord = log10(E) - log10(e_min)
+            # So to place a tick at energy E, use coordinate: log10(E) - log10(e_min)
+            
+            # Find decade boundaries within data range
+            decade_min = int(np.floor(log_e_min))
+            decade_max = int(np.ceil(log_e_max))
+            
+            # Major ticks at every decade (1e+00, 1e+01, 1e+02, etc.)
+            major_tick_energies = [10**d for d in range(decade_min, decade_max + 1)]
+            major_tick_positions = [np.log10(e) - log_e_min for e in major_tick_energies 
+                                   if e_min <= e <= e_max]
+            
+            # Minor ticks at 2e+XX, 3e+XX, ..., 9e+XX within each decade
+            minor_tick_positions = []
+            for decade in range(decade_min, decade_max + 1):
+                for multiplier in [2, 3, 4, 5, 6, 7, 8, 9]:
+                    e = multiplier * 10**decade
+                    if e_min <= e <= e_max:
+                        pos = np.log10(e) - log_e_min
+                        minor_tick_positions.append(pos)
+            
+            # Format function for scientific notation without units
+            # The tick position is in shifted log space, so we need to un-shift it
+            def format_energy_log(shifted_log_val, pos=None):
+                """Format shifted log10(energy) as scientific notation."""
+                # Un-shift: log10(E) = shifted_log_val + log10(e_min)
+                log_val = shifted_log_val + log_e_min
+                energy = 10**log_val
+                
+                # Use scientific notation format
+                exponent = int(np.round(log_val))
+                mantissa = energy / (10**exponent)
+                
+                # Clean format: "1e+01", "2e+00", etc.
+                if abs(mantissa - 1.0) < 0.1:  # It's a clean decade
+                    return f'1e{exponent:+03d}'
+                else:
+                    # For non-decade ticks (2e+01, 3e+01, etc.)
+                    return f'{int(np.round(mantissa))}e{exponent:+03d}'
+            
+            formatter = FuncFormatter(format_energy_log)
+            
+            # Set major ticks on top axis
+            ax_top.set_xlim(xlim)
+            ax_top.xaxis.set_major_locator(FixedLocator(major_tick_positions))
+            ax_top.xaxis.set_major_formatter(formatter)
+            ax_top.xaxis.set_minor_locator(FixedLocator(minor_tick_positions))
+            ax_top.tick_params(axis='x', which='major', labelsize=8, rotation=30, length=6, pad=2)
+            # Adjust label alignment to shift right
+            for label in ax_top.get_xticklabels():
+                label.set_ha('left')
+            ax_top.tick_params(axis='x', which='minor', length=3)
+            
+            # Set major ticks on right axis
+            ax_right.set_ylim(ylim)
+            ax_right.yaxis.set_major_locator(FixedLocator(major_tick_positions))
+            ax_right.yaxis.set_major_formatter(formatter)
+            ax_right.yaxis.set_minor_locator(FixedLocator(minor_tick_positions))
+            ax_right.tick_params(axis='y', which='major', labelsize=8, length=6)
+            ax_right.tick_params(axis='y', which='minor', length=3)
+            
         else:
-            # Single axes for heatmap only
-            ax_heatmap = fig.add_subplot(111)
-            uncertainty_axes = None
-        
-        # Get masked data
-        if hasattr(heatmap_data, 'get_masked_data'):
-            M = heatmap_data.get_masked_data()
-        else:
-            M = heatmap_data.matrix_data
-        
-        # Set background color for masked regions (fixed lightgray)
-        ax_heatmap.set_facecolor("#F0F0F0")
-        ax_heatmap.grid(False, which="both")
-        
-        # Apply styling overrides to heatmap_data attributes (create copy to avoid mutating original)
-        # Priority: styling_overrides > heatmap_data attributes > defaults
-        effective_cmap = styling_overrides.get('cmap', heatmap_data.cmap)
-        effective_vmin = styling_overrides.get('vmin', heatmap_data.vmin)
-        effective_vmax = styling_overrides.get('vmax', heatmap_data.vmax)
-        effective_norm = styling_overrides.get('norm', heatmap_data.norm)
-        effective_colorbar_label = styling_overrides.get('colorbar_label', heatmap_data.colorbar_label)
-        
+            # Linear scale: coordinates are not transformed (just the raw energy values)
+            from matplotlib.ticker import MaxNLocator
+            
+            # Use linear spacing
+            locator = MaxNLocator(nbins=6, steps=[1, 2, 5, 10])
+            tick_positions = locator.tick_values(energy_grid.min(), energy_grid.max())
+            tick_positions = tick_positions[(tick_positions >= energy_grid.min()) & 
+                                           (tick_positions <= energy_grid.max())]
+            
+            # Format function for scientific notation without units
+            def format_energy_linear(val, pos=None):
+                if val == 0:
+                    return '0'
+                exponent = int(np.floor(np.log10(abs(val))))
+                mantissa = val / (10**exponent)
+                if abs(mantissa - 1.0) < 0.1:
+                    return f'1e{exponent:+03d}'
+                else:
+                    return f'{int(np.round(mantissa))}e{exponent:+03d}'
+            
+            formatter = FuncFormatter(format_energy_linear)
+            
+            ax_top.set_xlim(xlim)
+            ax_top.set_xticks(tick_positions)
+            ax_top.xaxis.set_major_formatter(formatter)
+            ax_top.tick_params(axis='x', labelsize=10, rotation=30, pad=2)
+            # Adjust label alignment to shift right
+            for label in ax_top.get_xticklabels():
+                label.set_ha('left')
+            
+            ax_right.set_ylim(ylim)
+            ax_right.set_yticks(tick_positions)
+            ax_right.yaxis.set_major_formatter(formatter)
+            ax_right.tick_params(axis='y', labelsize=10)
+
+    def _add_multi_block_energy_ticks(
+        self,
+        ax: plt.Axes,
+        energy_grids: Dict[Any, np.ndarray],
+        block_ranges: Dict[Any, Tuple[float, float]],
+        scale: str = 'log'
+    ) -> None:
+        """
+        Add energy tick marks for multiple blocks on secondary (top/right) axes.
+
+        Each block gets its own energy ticks within its coordinate range.
+
+        Parameters
+        ----------
+        ax : plt.Axes
+            Primary heatmap axes
+        energy_grids : dict
+            {key: energy_grid} where key is MT or L, energy_grid is bin boundaries in eV
+        block_ranges : dict
+            {key: (start, end)} coordinate ranges for each block
+        scale : str
+            'log' or 'linear' scaling
+        """
+        import numpy as np
+        from matplotlib.ticker import FuncFormatter, FixedLocator
+
+        ax_top = ax.twiny()
+        ax_right = ax.twinx()
+
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+
+        # Collect all tick positions and labels across blocks
+        all_major_x_positions = []
+        all_minor_x_positions = []
+        all_major_y_positions = []
+        all_minor_y_positions = []
+        tick_labels_x = {}  # position -> label
+        tick_labels_y = {}
+
+        # Sort keys to ensure consistent ordering
+        sorted_keys = sorted(block_ranges.keys())
+
+        for key in sorted_keys:
+            if key not in energy_grids or key not in block_ranges:
+                continue
+
+            energy_grid = np.asarray(energy_grids[key], dtype=float)
+            coord_start, coord_end = block_ranges[key]
+            coord_span = coord_end - coord_start
+
+            if len(energy_grid) < 2 or coord_span <= 0:
+                continue
+
+            e_min, e_max = energy_grid.min(), energy_grid.max()
+
+            if scale == 'log':
+                log_e_min = np.log10(np.maximum(e_min, 1e-300))
+                log_e_max = np.log10(e_max)
+                log_span = log_e_max - log_e_min
+
+                if log_span <= 0:
+                    continue
+
+                # Find decade boundaries
+                decade_min = int(np.floor(log_e_min))
+                decade_max = int(np.ceil(log_e_max))
+
+                # Major ticks at every decade
+                for decade in range(decade_min, decade_max + 1):
+                    e = 10**decade
+                    if e_min <= e <= e_max:
+                        # Map energy to coordinate position within this block
+                        frac = (np.log10(e) - log_e_min) / log_span
+                        pos = coord_start + frac * coord_span
+
+                        # Add to x and y positions
+                        all_major_x_positions.append(pos)
+                        all_major_y_positions.append(pos)
+
+                        # Label format
+                        label = f'1e{decade:+03d}'
+                        tick_labels_x[pos] = label
+                        tick_labels_y[pos] = label
+
+                # Minor ticks at 2-9 within each decade
+                for decade in range(decade_min, decade_max + 1):
+                    for mult in [2, 3, 4, 5, 6, 7, 8, 9]:
+                        e = mult * 10**decade
+                        if e_min <= e <= e_max:
+                            frac = (np.log10(e) - log_e_min) / log_span
+                            pos = coord_start + frac * coord_span
+                            all_minor_x_positions.append(pos)
+                            all_minor_y_positions.append(pos)
+
+            else:  # linear
+                from matplotlib.ticker import MaxNLocator
+
+                locator = MaxNLocator(nbins=4, steps=[1, 2, 5, 10])
+                tick_energies = locator.tick_values(e_min, e_max)
+                tick_energies = tick_energies[(tick_energies >= e_min) & (tick_energies <= e_max)]
+
+                energy_span = e_max - e_min
+                if energy_span <= 0:
+                    continue
+
+                for e in tick_energies:
+                    frac = (e - e_min) / energy_span
+                    pos = coord_start + frac * coord_span
+
+                    all_major_x_positions.append(pos)
+                    all_major_y_positions.append(pos)
+
+                    # Format label
+                    if e == 0:
+                        label = '0'
         # Setup colormap
         if isinstance(effective_cmap, str):
             cmap = plt.get_cmap(effective_cmap).copy()
@@ -1092,6 +1321,64 @@ class PlotBuilder:
                     if lbl and lbl == labels_all[-1]:
                         filtered_side_labels.append(lbl if is_last_block else "")
                     else:
+                        exponent = int(np.floor(np.log10(abs(e))))
+                        mantissa = e / (10**exponent)
+                        if abs(mantissa - 1.0) < 0.1:
+                            label = f'1e{exponent:+03d}'
+                        else:
+                            label = f'{int(np.round(mantissa))}e{exponent:+03d}'
+
+                    tick_labels_x[pos] = label
+                    tick_labels_y[pos] = label
+
+        # Set up top axis with x ticks
+        ax_top.set_xlim(xlim)
+        if all_major_x_positions:
+            ax_top.xaxis.set_major_locator(FixedLocator(all_major_x_positions))
+            # Create formatter that looks up labels
+            def format_x(val, pos=None):
+                return tick_labels_x.get(val, '')
+            ax_top.xaxis.set_major_formatter(FuncFormatter(format_x))
+        if all_minor_x_positions:
+            ax_top.xaxis.set_minor_locator(FixedLocator(all_minor_x_positions))
+        ax_top.tick_params(axis='x', which='major', labelsize=8, rotation=30, length=6, pad=2)
+        # Adjust label alignment to shift right
+        for label in ax_top.get_xticklabels():
+            label.set_ha('left')
+        ax_top.tick_params(axis='x', which='minor', length=3)
+
+        # Set up right axis with y ticks
+        ax_right.set_ylim(ylim)
+        if all_major_y_positions:
+            ax_right.yaxis.set_major_locator(FixedLocator(all_major_y_positions))
+            def format_y(val, pos=None):
+                return tick_labels_y.get(val, '')
+            ax_right.yaxis.set_major_formatter(FuncFormatter(format_y))
+        if all_minor_y_positions:
+            ax_right.yaxis.set_minor_locator(FixedLocator(all_minor_y_positions))
+        ax_right.tick_params(axis='y', which='major', labelsize=8, length=6)
+        ax_right.tick_params(axis='y', which='minor', length=3)
+
+    def _add_uncertainty_energy_ticks(
+        self,
+        ax: plt.Axes,
+        energy_grid: np.ndarray,
+        scale: str = 'log',
+        xlim: Optional[Tuple[float, float]] = None
+    ) -> None:
+        """
+        Add energy tick marks on bottom of uncertainty panel.
+
+        Parameters
+        ----------
+        ax : plt.Axes
+            Uncertainty panel axes (uses local coordinates starting at 0)
+        energy_grid : np.ndarray
+            Energy bin boundaries (in original eV units)
+        scale : str
+            'log' or 'linear' scaling
+        xlim : tuple, optional
+            X-axis limits (start, end) in transformed local coordinates
                         filtered_side_labels.append(lbl)
                 side_labels.extend(filtered_side_labels)
         else:
@@ -1163,6 +1450,72 @@ class PlotBuilder:
         - Support for multiple Legendre coefficient blocks
         """
         import numpy as np
+        from matplotlib.ticker import FuncFormatter, FixedLocator
+
+        if xlim is None:
+            xlim = ax.get_xlim()
+
+        if scale == 'log':
+            e_min, e_max = energy_grid.min(), energy_grid.max()
+            log_e_min = np.log10(np.maximum(e_min, 1e-300))
+            log_e_max = np.log10(e_max)
+
+            # Find decade boundaries
+            decade_min = int(np.floor(log_e_min))
+            decade_max = int(np.ceil(log_e_max))
+
+            # Major ticks at every decade
+            major_tick_energies = [10**d for d in range(decade_min, decade_max + 1)]
+            major_tick_positions = [np.log10(e) - log_e_min for e in major_tick_energies
+                                   if e_min <= e <= e_max]
+
+            # Minor ticks at 2e+XX, 3e+XX, ..., 9e+XX
+            minor_tick_positions = []
+            for decade in range(decade_min, decade_max + 1):
+                for multiplier in [2, 3, 4, 5, 6, 7, 8, 9]:
+                    e = multiplier * 10**decade
+                    if e_min <= e <= e_max:
+                        pos = np.log10(e) - log_e_min
+                        minor_tick_positions.append(pos)
+
+            # Format function for scientific notation
+            def format_energy_log(shifted_log_val, pos=None):
+                log_val = shifted_log_val + log_e_min
+                energy = 10**log_val
+                exponent = int(np.round(log_val))
+                mantissa = energy / (10**exponent)
+                if abs(mantissa - 1.0) < 0.1:
+                    return f'1e{exponent:+03d}'
+                else:
+                    return f'{int(np.round(mantissa))}e{exponent:+03d}'
+
+            formatter = FuncFormatter(format_energy_log)
+
+            # Set ticks on bottom axis
+            ax.set_xlim(xlim)
+            ax.xaxis.set_major_locator(FixedLocator(major_tick_positions))
+            ax.xaxis.set_major_formatter(plt.NullFormatter())
+            ax.xaxis.set_minor_locator(FixedLocator(minor_tick_positions))
+            ax.tick_params(axis='x', which='major', length=4,
+                          bottom=True, top=False, labelbottom=False, labeltop=False, direction='in')
+            ax.tick_params(axis='x', which='minor', length=2,
+                          bottom=True, top=False, direction='in')
+        else:
+            # Linear scale
+            from matplotlib.ticker import MaxNLocator
+
+            locator = MaxNLocator(nbins=6, steps=[1, 2, 5, 10])
+            tick_positions = locator.tick_values(energy_grid.min(), energy_grid.max())
+            tick_positions = tick_positions[(tick_positions >= energy_grid.min()) &
+                                           (tick_positions <= energy_grid.max())]
+
+            def format_energy_linear(val, pos=None):
+                if val == 0:
+                    return '0'
+                exponent = int(np.floor(np.log10(abs(val))))
+                mantissa = val / (10**exponent)
+                if abs(mantissa - 1.0) < 0.1:
+                    return f'1e{exponent:+03d}'
 
         block_info = data.block_info or {}
         legendre_list = block_info.get('legendre_coeffs', data.legendre_coeffs)
@@ -1318,6 +1671,18 @@ class PlotBuilder:
                 if lbl and (lbl == labels_all[0] or lbl == labels_all[-1]):
                     filtered_top_labels.append("")
                 else:
+                    return f'{int(np.round(mantissa))}e{exponent:+03d}'
+
+            formatter = FuncFormatter(format_energy_linear)
+
+            ax.set_xlim(xlim)
+            ax.set_xticks(tick_positions)
+            ax.xaxis.set_major_formatter(plt.NullFormatter())
+            ax.tick_params(axis='x', length=4,
+                          bottom=True, top=False, labelbottom=False, labeltop=False, direction='in')
+            ax.tick_params(axis='x', which='minor', length=2,
+                          bottom=True, top=False, direction='in')
+
                     filtered_top_labels.append(lbl)
             top_ticks.extend(pos_global.tolist())
             top_labels.extend(filtered_top_labels)
@@ -1447,13 +1812,19 @@ class PlotBuilder:
         self,
         uncertainty_axes: List[plt.Axes],
         heatmap_data: 'HeatmapPlotData',
-        ax_heatmap: plt.Axes
+        ax_heatmap: plt.Axes,
+        x_limits: Optional[Tuple[float, float]] = None
     ) -> None:
         """
         Draw uncertainty panels above heatmap.
         
         Uses step plotting with 'post' stepping for proper bin coverage,
         adds internal grid lines at 10% intervals with right-aligned labels.
+        
+        Parameters
+        ----------
+        x_limits : tuple, optional
+            X-axis limits (start, end) in transformed coordinates to match heatmap zoom
         """
         from .plot_data import CovarianceHeatmapData, MF34HeatmapData
         import numpy as np
@@ -1479,15 +1850,15 @@ class PlotBuilder:
             return float(top), float(step)
 
         def _draw_ygrid_inside(ax_u, xr, ymax):
-            """Draw grid lines with adaptive spacing and right-aligned labels inside uncertainty panel."""
+            """Draw grid lines with adaptive spacing and left-aligned labels inside uncertainty panel."""
             top, step = _nice_ylim_and_step(ymax)
             grid_vals = np.arange(0.0, top + 1e-9, step)
             for y in grid_vals:
                 ax_u.axhline(y, color=tick_grey, lw=0.6, alpha=0.35, zorder=0)
-            x_label = xr[1] - 0.01 * (xr[1] - xr[0])
+            x_label = xr[0] + 0.02 * (xr[1] - xr[0])
             for y in grid_vals:
                 lbl = f"{y:g}" if step < 1 else f"{int(y)}"
-                ax_u.text(x_label, y, lbl, ha="right", va="center",
+                ax_u.text(x_label, y, lbl, ha="left", va="center",
                          color=tick_grey, fontsize=8, alpha=0.9, zorder=2)
         
         # Get sorted keys (MTs or Legendre orders)
@@ -1541,9 +1912,21 @@ class PlotBuilder:
                     y_max = max(y_max, 1.0)
                     top, _ = _nice_ylim_and_step(y_max * 1.05)
                     ax_u.set_ylim(0.0, top)
-                    ax_u.set_xlim(0.0, xs_local[-1])
+                    
+                    # Apply x_limits if provided (to match heatmap zoom)
+                    if x_limits is not None:
+                        ax_u.set_xlim(x_limits)
+                    else:
+                        ax_u.set_xlim(0.0, xs_local[-1])
 
-                    ax_u.set_xticks([])
+                    # Add energy ticks to uncertainty panel
+                    raw_grid = heatmap_data.energy_grids.get(L) if heatmap_data.energy_grids else None
+                    if raw_grid is not None:
+                        current_xlim = ax_u.get_xlim()
+                        self._add_uncertainty_energy_ticks(ax_u, raw_grid, heatmap_data.scale,
+                                                         xlim=current_xlim)
+                    else:
+                        ax_u.set_xticks([])
                     ax_u.set_yticks([])
 
                     _draw_ygrid_inside(ax_u, (0.0, xs_local[-1]), ax_u.get_ylim()[1])
@@ -1579,8 +1962,20 @@ class PlotBuilder:
                 top, _ = _nice_ylim_and_step(y_max * 1.05)
                 ax_u.set_ylim(0.0, top)
 
-                ax_u.set_xlim(0.0, xs_local[-1])
-                ax_u.set_xticks([])
+                # Apply x_limits if provided (to match heatmap zoom)
+                if x_limits is not None:
+                    ax_u.set_xlim(x_limits)
+                else:
+                    ax_u.set_xlim(0.0, xs_local[-1])
+
+                # Add energy ticks to uncertainty panel
+                raw_grid = heatmap_data.energy_grids.get(L) if heatmap_data.energy_grids else None
+                if raw_grid is not None:
+                    current_xlim = ax_u.get_xlim()
+                    self._add_uncertainty_energy_ticks(ax_u, raw_grid, heatmap_data.scale,
+                                                     xlim=current_xlim)
+                else:
+                    ax_u.set_xticks([])
                 ax_u.set_yticks([])
 
                 _draw_ygrid_inside(ax_u, (0.0, xs_local[-1]), ax_u.get_ylim()[1])
@@ -1589,7 +1984,7 @@ class PlotBuilder:
 
                 for side in ('left', 'right', 'top', 'bottom'):
                     ax_u.spines[side].set_visible(False)
-        
+
         elif isinstance(heatmap_data, CovarianceHeatmapData):
             # CovMat uncertainty panels
             energy_grid = heatmap_data.energy_grid
@@ -1628,9 +2023,20 @@ class PlotBuilder:
                 y_max = max(y_max, 1.0)
                 top, _ = _nice_ylim_and_step(y_max * 1.05)
                 ax_unc.set_ylim(0.0, top)
-                ax_unc.set_xlim(xs_plot[0], xs_plot[-1])
+                
+                # Apply x_limits if provided (to match heatmap zoom)
+                if x_limits is not None:
+                    ax_unc.set_xlim(x_limits)
+                else:
+                    ax_unc.set_xlim(xs_plot[0], xs_plot[-1])
 
-                ax_unc.set_xticks([])
+                # Add energy ticks to uncertainty panel
+                if energy_grid is not None:
+                    current_xlim = ax_unc.get_xlim()
+                    self._add_uncertainty_energy_ticks(ax_unc, energy_grid, heatmap_data.scale,
+                                                     xlim=current_xlim)
+                else:
+                    ax_unc.set_xticks([])
                 ax_unc.set_yticks([])
 
                 if xs_edges.size >= 2:
@@ -1642,6 +2048,77 @@ class PlotBuilder:
                 for side in ('left', 'right', 'top', 'bottom'):
                     ax_unc.spines[side].set_visible(False)
     
+    def _add_block_labels_figure_fixed(
+        self,
+        fig: plt.Figure,
+        ax: plt.Axes,
+        centers: List[float],
+        labels: List[str],
+        full_xlim: Tuple[float, float],
+        full_ylim: Tuple[float, float],
+        *,
+        pad_frac_x: float = 0.000,  # Reduced to bring bottom labels closer to plot
+        pad_frac_y: float = 0.012,  # Reduced to bring left labels closer to plot
+        fontsize: Optional[float] = None,
+        x_axis_label: Optional[str] = None,  # Outer label for x-axis (e.g., "MT Number")
+        y_axis_label: Optional[str] = None,  # Outer label for y-axis (e.g., "Legendre Order")
+    ) -> None:
+        """
+        Place block labels relative to the figure (not axis ticks), so they do not shift
+        when set_xlim/set_ylim is used.
+
+        Positions are computed relative to the FULL data extent (full_xlim/full_ylim).
+        Bottom labels are placed further down to appear below energy tick labels.
+        Left labels are placed further left to avoid overlap with y-axis tick labels.
+
+        Optionally adds outer axis labels (x_axis_label, y_axis_label) centered on each axis,
+        positioned further out than the block number labels.
+        """
+        ax_pos = ax.get_position()
+
+        x0, x1 = float(full_xlim[0]), float(full_xlim[1])
+        y0, y1 = float(full_ylim[0]), float(full_ylim[1])
+        dx = (x1 - x0) if (x1 > x0) else 1.0
+        dy = (y1 - y0) if (y1 > y0) else 1.0
+
+        fs = fontsize if fontsize is not None else (self._tick_labelsize or 11)
+        outer_label_fs = fs  # Same font size for outer labels
+
+        # Bottom labels (x direction) - placed further down to swap with energy ticks
+        y_text = ax_pos.y0 - pad_frac_x
+        for c, lab in zip(centers, labels):
+            frac = (float(c) - x0) / dx
+            frac = min(1.0, max(0.0, frac))
+            x_text = ax_pos.x0 + frac * ax_pos.width
+            fig.text(x_text, y_text, lab, ha="center", va="top", fontsize=fs)
+
+        # Left labels (y direction) - placed further left for more separation
+        # INVERT because heatmap y-axis is flipped (origin='upper' / set_ylim(high, low))
+        x_text = ax_pos.x0 - pad_frac_y
+        for c, lab in zip(centers, labels):
+            frac = (float(c) - y0) / dy
+            frac = min(1.0, max(0.0, frac))
+            frac = 1.0 - frac  # Invert for y-axis
+            y_text = ax_pos.y0 + frac * ax_pos.height
+            fig.text(x_text, y_text, lab, ha="right", va="center", fontsize=fs)
+
+        # Outer axis labels (further out, centered on each axis)
+        outer_offset = 0.025  # Additional offset for outer labels
+
+        if x_axis_label:
+            # Bottom outer label - centered horizontally, below the block labels
+            x_center = ax_pos.x0 + ax_pos.width / 2
+            y_outer = ax_pos.y0 - pad_frac_x - outer_offset
+            fig.text(x_center, y_outer, x_axis_label, ha="center", va="top",
+                    fontsize=outer_label_fs)
+
+        if y_axis_label:
+            # Left outer label - centered vertically, left of the block labels, rotated 90°
+            x_outer = ax_pos.x0 - pad_frac_y - outer_offset
+            y_center = ax_pos.y0 + ax_pos.height / 2
+            fig.text(x_outer, y_center, y_axis_label, ha="right", va="center",
+                    fontsize=outer_label_fs, rotation=90)
+
     def build(self, show: bool = False) -> plt.Figure:
         """
         Build and return the figure.
@@ -1799,10 +2276,14 @@ class PlotBuilder:
             if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
                 self.ax.set_xlim(x_min, x_max)
         else:
-            # Apply user-specified limits
+            # Apply user-specified limits (validate for log scale)
             if self._x_lim is not None:
-                self.ax.set_xlim(self._x_lim)
-        
+                x_lim = self._x_lim
+                if self._use_log_x:
+                    # For log scale, ensure limits are positive
+                    x_lim = (max(x_lim[0], 1e-10), max(x_lim[1], 1e-10))
+                self.ax.set_xlim(x_lim)
+
         if self._y_lim is None and self._data_list:
             # Find the data range across all datasets (including uncertainty bands)
             y_values = []
@@ -1847,10 +2328,14 @@ class PlotBuilder:
                             y_max = y_max + padding
                         self.ax.set_ylim(y_min, y_max)
         else:
-            # Apply user-specified limits
+            # Apply user-specified limits (validate for log scale)
             if self._y_lim is not None:
-                self.ax.set_ylim(self._y_lim)
-        
+                y_lim = self._y_lim
+                if self._use_log_y:
+                    # For log scale, ensure limits are positive
+                    y_lim = (max(y_lim[0], 1e-10), max(y_lim[1], 1e-10))
+                self.ax.set_ylim(y_lim)
+
         # Apply axis labels
         if self._x_label is not None:
             if self._label_fontsize is not None:
@@ -1874,8 +2359,8 @@ class PlotBuilder:
             else:
                 self.ax.set_ylabel(self._y_label)
         
-        # Apply title
-        if self._title is not None:
+        # Apply title (only if explicitly set to a non-empty string)
+        if self._title is not _NOT_SET and self._title:
             if self._title_fontsize is not None:
                 self.ax.set_title(self._title, fontsize=self._title_fontsize)
             else:
@@ -1967,12 +2452,11 @@ class PlotBuilder:
         if self._grid:
             # Major grid
             self.ax.grid(True, which='major', linestyle='--', alpha=self._grid_alpha)
-            
-            # Minor grid (enabled for light style by default, or if explicitly requested)
-            if self._show_minor_grid or (self.style == 'light' and not hasattr(self, '_grid_configured')):
+
+            # Minor grid (only when explicitly requested)
+            if self._show_minor_grid:
                 self.ax.minorticks_on()
-                minor_alpha = self._minor_grid_alpha if self._show_minor_grid else 0.25
-                self.ax.grid(True, which='minor', linestyle=':', alpha=minor_alpha, linewidth=0.5)
+                self.ax.grid(True, which='minor', linestyle=':', alpha=self._minor_grid_alpha, linewidth=0.5)
         else:
             self.ax.grid(False)
         

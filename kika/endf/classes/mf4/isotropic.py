@@ -137,7 +137,59 @@ class MF4MTIsotropic(MF4MT):
             label=label,
             **styling_kwargs
         )
-        
+
+    def to_bulk_plot_data(
+        self,
+        max_order: int = 12,
+        energy_range: Tuple[float, float] = (1e-5, 20e6),
+        num_points: int = 100
+    ) -> Dict[str, Union[List[float], Dict[int, List[float]], int, str]]:
+        """
+        Extract ALL Legendre orders at once for bulk loading.
+
+        For isotropic distributions:
+        - a_0(E) = 1.0 for all energies
+        - a_l(E) = 0.0 for all l > 0
+
+        Parameters
+        ----------
+        max_order : int, optional
+            Maximum Legendre order to include (default: 12)
+        energy_range : tuple, optional
+            (E_min, E_max) energy range for the generated grid (default: 1e-5 to 20 MeV)
+        num_points : int, optional
+            Number of energy points to generate (default: 100)
+
+        Returns
+        -------
+        dict
+            Dictionary containing:
+            - 'energies': list of energy values (eV)
+            - 'coefficients_by_order': dict mapping order (int) to list of coefficients
+            - 'max_order': maximum order extracted
+            - 'isotope': isotope identifier (if available)
+            - 'mt': MT reaction number
+        """
+        # Generate energy grid
+        energies = np.logspace(np.log10(energy_range[0]), np.log10(energy_range[1]), num_points)
+
+        coefficients_by_order: Dict[int, List[float]] = {}
+
+        # Order 0 is always 1.0
+        coefficients_by_order[0] = [1.0] * num_points
+
+        # All higher orders are 0.0 for isotropic
+        for order in range(1, max_order + 1):
+            coefficients_by_order[order] = [0.0] * num_points
+
+        return {
+            'energies': energies.tolist(),
+            'coefficients_by_order': coefficients_by_order,
+            'max_order': max_order,
+            'isotope': getattr(self, 'isotope', None),
+            'mt': getattr(self, 'number', None),
+        }
+
     def __str__(self) -> str:
         """
         Convert the MF4MTIsotropic object back to ENDF format string.
