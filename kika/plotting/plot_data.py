@@ -170,6 +170,8 @@ class LegendreUncertaintyPlotData(PlotData):
         MT reaction number
     uncertainty_type : str
         'relative' or 'absolute'
+    sigma : float
+        Number of sigma levels (1.0 = 1σ, 2.0 = 2σ)
     energy_bins : array-like, optional
         Energy bin boundaries for step plots
     step_where : str
@@ -179,6 +181,7 @@ class LegendreUncertaintyPlotData(PlotData):
     isotope: Optional[str] = None
     mt: Optional[int] = None
     uncertainty_type: str = 'relative'
+    sigma: float = 1.0
     energy_bins: Optional[np.ndarray] = None
     step_where: str = 'post'
     

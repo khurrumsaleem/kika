@@ -113,12 +113,48 @@ class MF4MTLegendre(MF4MT):
         >>> data = mf4_obj.to_plot_data(order=1, color='blue')
         >>> builder = PlotBuilder().add_data(data).build()
         >>> 
-        >>> # Method 2: Using utility function (equivalent)
-        >>> from kika.endf.classes.mf4.plot_utils import create_legendre_coeff_plot_data
-        >>> data = create_legendre_coeff_plot_data(mf4_obj, order=1, color='blue')
         """
-        from .plot_utils import create_legendre_coeff_plot_data
-        return create_legendre_coeff_plot_data(self, order=order, label=label, **styling_kwargs)
+        from kika.plotting import LegendreCoeffPlotData
+        
+        # Get energy grid from Legendre data
+        energies = np.array(self._energies, dtype=float)
+        
+        if len(energies) == 0:
+            raise ValueError("No Legendre data available to create plot")
+        
+        # Extract Legendre coefficients at all energy points using the built-in method
+        coeffs_dict = self.extract_legendre_coefficients(
+            energy=energies,
+            max_legendre_order=order,
+            out_of_range="zero"
+        )
+        
+        # Get the coefficient values for the requested order
+        coeff_values = coeffs_dict[order]
+        
+        # Get isotope information
+        isotope = getattr(self, 'isotope', None)
+        if isotope is None and hasattr(self, 'zaid'):
+            isotope = str(self.zaid)
+        
+        mt = getattr(self, 'number', None)
+        
+        # Auto-generate label if not provided
+        if label is None:
+            label = f'Legendre L={order}'
+            if isotope:
+                label = f'{isotope} {label}'
+        
+        return LegendreCoeffPlotData(
+            x=energies,
+            y=coeff_values,
+            order=order,
+            isotope=isotope,
+            mt=mt,
+            energy_range=(energies.min(), energies.max()),
+            label=label,
+            **styling_kwargs
+        )
     
     def extract_legendre_coefficients(
         self,

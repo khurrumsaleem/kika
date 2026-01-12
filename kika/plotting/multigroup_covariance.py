@@ -881,10 +881,13 @@ def plot_mg_covariance_heatmap(
     
     # Create the plot using PlotBuilder (always use light style for heatmaps)
     builder = PlotBuilder(style="light", figsize=figsize, dpi=dpi, font_family=font_family)
-    fig = builder.add_heatmap(
+    builder.add_heatmap(
         heatmap_data,
         show_uncertainties=show_uncertainties,
     )
+    
+    # Build the figure
+    fig = builder.build()
     
     # If uncertainties panels are shown, lower the title slightly for better layout
     if show_uncertainties and fig is not None and heatmap_data.label:

@@ -64,8 +64,7 @@ class ENDF:
         """
         return self.files
     
-    def to_plot_data(self, mf: int, mt: int, uncertainty: bool = True, 
-                     sigma: float = 1.0, **kwargs):
+    def to_plot_data(self, mf: int, mt: int, sigma: float = 1.0, **kwargs):
         """
         Create a PlotData object from the specified MF and MT sections.
         
@@ -79,16 +78,12 @@ class ENDF:
         Parameters
         ----------
         mf : int
-            MF file number to extract data from
+            MF file number to extract data from (4 for angular, 34 for angular uncertainties)
         mt : int
             MT section number to extract data from
-        uncertainty : bool, optional
-            If True and mf=4, extract uncertainty bands from MF34. 
-            If None (default), automatically set to True for MF4, False for other MF files.
-            Only works for MF4 since it combines data from MF4 (nominal) and MF34 (uncertainties).
         sigma : float, optional
             Number of sigma levels for uncertainty bands (default: 1.0 for 1σ).
-            Only used when uncertainty=True.
+            Only used when extracting uncertainties (MF34 data or MF4 with MF34 available).
         **kwargs
             Additional parameters passed to the underlying to_plot_data method.
             For MF4, this should include 'order' (Legendre polynomial order).
@@ -96,11 +91,13 @@ class ENDF:
             
         Returns
         -------
-        PlotData or tuple of (PlotData, UncertaintyBand or None)
-            - For MF4 with uncertainty=True (default): Returns tuple of 
-              (PlotData, UncertaintyBand or None). The UncertaintyBand will be None 
-              if MF34 data is not available.
-            - For other MF files or uncertainty=False: Returns PlotData object only.
+        tuple of (PlotData, PlotData or None) for MF4
+            Returns tuple of (nominal_data, uncertainty_data). The uncertainty_data 
+            will be None if MF34 data is not available.
+        PlotData for MF34
+            Returns LegendreUncertaintyPlotData directly (uncertainty data only).
+        PlotData for other MF files
+            Returns PlotData object only.
             
         Raises
         ------
@@ -108,125 +105,90 @@ class ENDF:
             If the MF file or MT section doesn't exist
         AttributeError
             If the MT section doesn't support to_plot_data
-        ValueError
-            If uncertainty=True for MF files other than MF4
             
         Examples
         --------
         >>> # For MF4 data - automatically includes uncertainties if MF34 present
         >>> endf = read_endf('fe56.endf')
-        >>> data, unc_band = endf.to_plot_data(mf=4, mt=2, order=1)
+        >>> data, unc = endf.to_plot_data(mf=4, mt=2, order=1)
         >>> 
-        >>> # Explicitly control uncertainty extraction
-        >>> data, unc_band = endf.to_plot_data(mf=4, mt=2, order=1, 
-        ...                                      uncertainty=True, 
-        ...                                      sigma=1.0)
+        >>> # Extract 2-sigma uncertainties
+        >>> data, unc_2sigma = endf.to_plot_data(mf=4, mt=2, order=1, sigma=2.0)
         >>> 
-        >>> # Disable uncertainty extraction for MF4
-        >>> data = endf.to_plot_data(mf=4, mt=2, order=1, uncertainty=False)
+        >>> # Get just uncertainties from MF34
+        >>> unc_only = endf.to_plot_data(mf=34, mt=2, order=1)
         >>> 
-        >>> # Use with PlotBuilder - unified API with multigroup classes
+        >>> # Use with PlotBuilder
         >>> from kika.plotting import PlotBuilder
-        >>> data, unc_band = endf.to_plot_data(mf=4, mt=2, order=1)
+        >>> data, unc = endf.to_plot_data(mf=4, mt=2, order=1)
         >>> builder = PlotBuilder()
-        >>> if unc_band is not None:
-        ...     builder.add_data(data, uncertainty=unc_band)
-        ... else:
-        ...     builder.add_data(data)
+        >>> builder.add_data(data, uncertainty=unc)  # unc can be None, that's OK
         >>> fig = builder.build()
+        >>> 
+        >>> # Plot only uncertainties as lines
+        >>> unc_data = endf.to_plot_data(mf=34, mt=2, order=1)
+        >>> fig = PlotBuilder().add_data(unc_data).build()
         """
         if mf not in self.files:
             raise KeyError(f"MF file {mf} not found in ENDF")
         
-        # Auto-set uncertainty based on MF file type
-        if uncertainty is None:
-            # Default to True for MF4 (to extract MF34 uncertainties)
-            # Default to False for MF34 (since MF34 IS the uncertainty data)
-            # Default to False for all other MF files
-            uncertainty = (mf == 4)
+        # Handle MF34 - return uncertainty data directly
+        if mf == 34:
+            # For MF34, pass sigma to the underlying method
+            return self.files[mf].to_plot_data(mt=mt, sigma=sigma, **kwargs)
         
-        # Force uncertainty=False for MF34 since it IS the uncertainty data
-        if mf == 34 and uncertainty:
-            uncertainty = False  # Silently override - MF34 doesn't have uncertainties of uncertainties
-        
-        # Validate that uncertainty is only used with MF4
-        if uncertainty and mf != 4:
-            raise ValueError(
-                f"uncertainty is only supported for MF4 (angular distributions), not MF{mf}. "
-                "This feature requires combining data from MF4 (nominal) and MF34 (uncertainties)."
-            )
-        
-        # Get the main plot data
-        plot_data = self.files[mf].to_plot_data(mt=mt, **kwargs)
-        
-        # If uncertainties are not requested, return just the plot data
-        if not uncertainty:
-            return plot_data
-        
-        # Try to create uncertainty band from MF34 data
-        uncertainty_band = None
-        
-        # Check if MF34 exists and has the requested MT section
-        if 34 in self.files and mt in self.files[34].mt:
-            try:
-                # Extract the order parameter (required for MF4)
-                order = kwargs.get('order')
-                if order is None:
-                    raise ValueError("'order' parameter is required when uncertainty=True for MF4")
-                
-                # Get MF34 covariance data
-                mf34_mt = self.files[34].mt[mt]
-                mf34_covmat = mf34_mt.to_ang_covmat()
-                
-                # Get isotope ID (ZAID)
-                isotope_id = self.zaid if self.zaid is not None else int(mf34_mt._za)
-                
-                # Prepare kwargs for MF34CovMat.to_plot_data - remove parameters we're setting explicitly
-                styling_kwargs = {k: v for k, v in kwargs.items() if k not in ['order', 'mt', 'isotope', 'uncertainty_type']}
-                
-                # Get uncertainty data from MF34 (returns LegendreUncertaintyPlotData on native grid)
-                unc_native = mf34_covmat.to_plot_data(
-                    isotope=isotope_id,
-                    mt=mt,
-                    order=order,
-                    uncertainty_type='relative',
-                    color=plot_data.color,  # Match the main plot color
-                    **styling_kwargs
-                )
-                
-                if unc_native is not None:
-                    # Return the native MF34 uncertainty data directly (on sparse grid)
-                    # This allows it to be:
-                    # 1. Plotted as a step plot (preserves native structure)
-                    # 2. Used as uncertainty band (PlotBuilder will handle interpolation)
+        # Handle MF4 - return tuple of (nominal, uncertainty)
+        if mf == 4:
+            # Get the nominal plot data
+            plot_data = self.files[mf].to_plot_data(mt=mt, **kwargs)
+            
+            # Try to create uncertainty data from MF34
+            uncertainty_data = None
+            
+            if 34 in self.files and mt in self.files[34].mt:
+                try:
+                    # Extract the order parameter (required for MF4)
+                    order = kwargs.get('order')
+                    if order is None:
+                        raise ValueError("'order' parameter is required for MF4")
                     
-                    # Apply sigma multiplier if needed
-                    if sigma != 1.0:
-                        import numpy as np
-                        unc_native.y = np.array(unc_native.y) * sigma
-                        # Update label to reflect sigma level
-                        if unc_native.label:
-                            unc_native.label = unc_native.label.replace('(σ %)', f'({sigma}σ %)')
+                    # Get MF34 covariance data
+                    mf34_mt = self.files[34].mt[mt]
+                    mf34_covmat = mf34_mt.to_ang_covmat()
                     
-                    # Match color to nominal data
-                    unc_native.color = plot_data.color
+                    # Get isotope ID (ZAID)
+                    isotope_id = self.zaid if self.zaid is not None else int(mf34_mt._za)
                     
-                    # Use the native uncertainty data directly
-                    uncertainty_band = unc_native
+                    # Prepare kwargs for MF34CovMat.to_plot_data
+                    styling_kwargs = {k: v for k, v in kwargs.items() 
+                                      if k not in ['order', 'mt', 'isotope', 'uncertainty_type']}
                     
-                    # Append uncertainty info to the main plot label
-                    if plot_data.label is not None:
+                    # Get uncertainty data from MF34
+                    # MF34 data is kept in eV (native ENDF format) to match MF4
+                    uncertainty_data = mf34_covmat.to_plot_data(
+                        isotope=isotope_id,
+                        mt=mt,
+                        order=order,
+                        sigma=sigma,
+                        uncertainty_type='relative',
+                        color=plot_data.color,  # Match the main plot color
+                        **styling_kwargs
+                    )
+                    
+                    # Update nominal data label with sigma info
+                    if uncertainty_data is not None and plot_data.label is not None:
                         sigma_suffix = f" (±{sigma}σ)" if sigma != 1.0 else " (±1σ)"
                         plot_data.label = plot_data.label + sigma_suffix
-                else:
-                    uncertainty_band = None
-                    
-            except Exception as e:
-                # If anything goes wrong, just skip the uncertainty band
-                print(f"Warning: Could not create uncertainty band: {e}")
-                uncertainty_band = None
+                        
+                except Exception as e:
+                    # If anything goes wrong, just skip the uncertainty
+                    print(f"Warning: Could not create uncertainty data: {e}")
+                    uncertainty_data = None
+            
+            return plot_data, uncertainty_data
         
-        return plot_data, uncertainty_band
+        # For other MF files, just return the plot data directly
+        return self.files[mf].to_plot_data(mt=mt, **kwargs)
     
     def __repr__(self):
         return f"ENDF({len(self.files)} files)"

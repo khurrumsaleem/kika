@@ -337,6 +337,10 @@ def load_exfor_data(json_file: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     else:
         print(f"Warning: Unknown angle unit '{angle_unit}'. Expected 'ADEG' or 'COS'. Assuming degrees.")
     
+    # Add filename to metadata for identification
+    import os
+    meta['filename'] = os.path.basename(json_file)
+    
     return df, meta
 
 
@@ -377,7 +381,14 @@ def extract_experiment_info(meta: Dict[str, Any]) -> Tuple[str, str]:
         else:
             experiment_label = f"{last_name} ({experiment_year})"
     else:
-        experiment_label = f"Experiment ({experiment_year})"
+        # Use filename if available, otherwise fall back to generic label
+        filename = meta.get('filename', 'Unknown')
+        if filename != 'Unknown':
+            # Remove extension and clean up filename for display
+            base_name = filename.replace('.json', '').replace('_', ' ')
+            experiment_label = f"{base_name} ({experiment_year})"
+        else:
+            experiment_label = f"Experiment ({experiment_year})"
     
     return experiment_label, experiment_year
 

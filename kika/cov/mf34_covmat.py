@@ -757,6 +757,7 @@ class MF34CovMat:
         cmap: Optional[any] = None,
         scale: str = "log",
         energy_range: Optional[Tuple[float, float]] = None,
+        title: Optional[str] = "default",
         **imshow_kwargs,
     ) -> 'plt.Figure':
         """
@@ -799,6 +800,9 @@ class MF34CovMat:
             Energy axis scale: "log"/"logarithmic" or "lin"/"linear"
         energy_range : tuple of float, optional
             Energy range (min, max) for filtering. Values in eV.
+        title : str or None, default "default"
+            Plot title. If "default", auto-generates from nuclide, MT, and Legendre coefficient.
+            If a string, uses that as the title. If None, suppresses the title.
         **imshow_kwargs
             Additional arguments passed to imshow (deprecated)
 
@@ -824,6 +828,7 @@ class MF34CovMat:
             cmap=cmap,
             energy_range=energy_range,
             scale=scale,
+            title=title,
         )
 
     def plot_uncertainties(
@@ -919,6 +924,7 @@ class MF34CovMat:
         isotope: int,
         mt: int,
         order: int,
+        sigma: float = 1.0,
         uncertainty_type: str = 'relative',
         label: str = None,
         **styling_kwargs
@@ -937,10 +943,14 @@ class MF34CovMat:
             Reaction MT number
         order : int
             Legendre polynomial order
+        sigma : float, default 1.0
+            Number of sigma levels for uncertainty (1.0 = 1σ, 2.0 = 2σ)
         uncertainty_type : str, default 'relative'
             Type of uncertainty: 'relative' (%) or 'absolute'
         label : str, optional
             Custom label for the plot. If None, auto-generates from isotope and order.
+            Note: Energy values are returned in eV (native ENDF-6 format) to ensure
+            compatibility when combining with MF4 data.
         **styling_kwargs
             Additional styling kwargs (color, linestyle, linewidth, etc.)
             
@@ -956,9 +966,12 @@ class MF34CovMat:
             
         Examples
         --------
-        >>> # Extract uncertainty data from MF34CovMat
+        >>> # Extract 1-sigma uncertainty data
         >>> mf34_covmat = endf.mf[34].mt[2].to_ang_covmat()
         >>> unc_data = mf34_covmat.to_plot_data(isotope=26056, mt=2, order=1)
+        >>>
+        >>> # Extract 2-sigma uncertainty data
+        >>> unc_2sigma = mf34_covmat.to_plot_data(isotope=26056, mt=2, order=1, sigma=2.0)
         >>> 
         >>> # Build a plot
         >>> from kika.plotting import PlotBuilder
@@ -979,10 +992,11 @@ class MF34CovMat:
         energies = unc_data['energies']
         uncertainties = unc_data['uncertainties']
         
-        # Convert energies from eV to MeV
-        energies_mev = np.asarray(energies, dtype=float) / 1e6
+        # Keep energies in eV (native ENDF-6 format)
+        # This ensures compatibility with MF4 data which is also in eV
+        energies_eV = np.asarray(energies, dtype=float)
         
-        # Get energy bin boundaries
+        # Get energy bin boundaries (also in eV)
         energy_bins = None
         for i, (iso_r, mt_r, l_r, iso_c, mt_c, l_c) in enumerate(zip(
             self.isotope_rows, self.reaction_rows, self.l_rows,
@@ -992,39 +1006,44 @@ class MF34CovMat:
             if (iso_r == isotope and iso_c == isotope and 
                 mt_r == mt and mt_c == mt and 
                 l_r == order and l_c == order):
-                energy_bins = np.array(self.energy_grids[i], dtype=float) / 1e6  # Convert to MeV
+                energy_bins = np.array(self.energy_grids[i], dtype=float)
                 break
         
-        # Convert to percentage if relative
+        # Apply sigma scaling and convert to percentage if relative
         if uncertainty_type.lower() == 'relative':
-            uncertainties = uncertainties * 100.0  # Convert to percentage
+            uncertainties = uncertainties * 100.0 * sigma  # Convert to percentage and apply sigma
+        else:
+            uncertainties = uncertainties * sigma  # Apply sigma for absolute too
         
         # Generate label if not provided
         if label is None:
             isotope_symbol = zaid_to_symbol(isotope)
+            sigma_str = f"{sigma}σ" if sigma != 1.0 else "1σ"
             if uncertainty_type.lower() == 'relative':
-                label = f"{isotope_symbol} MT={mt} L={order} (σ %)"
+                label = f"{isotope_symbol} MT={mt} L={order} ({sigma_str} %)"
             else:
-                label = f"{isotope_symbol} MT={mt} L={order} (σ abs)"
+                label = f"{isotope_symbol} MT={mt} L={order} ({sigma_str} abs)"
         
         # For step plots with histogram data:
         # - energies has N+1 bin boundaries
         # - uncertainties has N values (one per bin)
         # For proper step plotting with where='post', we need to duplicate the last
         # uncertainty value so that the last bin is drawn extending to the last boundary
-        if len(energies_mev) == len(uncertainties) + 1:
+        if len(energies_eV) == len(uncertainties) + 1:
             # Append the last uncertainty value to match the energy boundaries length
             uncertainties = np.append(uncertainties, uncertainties[-1])
         
         # Create and return PlotData object
+        # Note: x values are in eV to match MF4 data
         return LegendreUncertaintyPlotData(
-            x=energies_mev,
+            x=energies_eV,
             y=uncertainties,
             label=label,
             order=order,
             isotope=zaid_to_symbol(isotope),
             mt=mt,
             uncertainty_type=uncertainty_type,
+            sigma=sigma,
             energy_bins=energy_bins,
             **styling_kwargs
         )

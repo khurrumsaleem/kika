@@ -857,6 +857,7 @@ class MF34MT(MT):
     def to_plot_data(
         self,
         order: int,
+        sigma: float = 1.0,
         uncertainty_type: str = 'relative',
         label: str = None,
         **styling_kwargs
@@ -873,6 +874,8 @@ class MF34MT(MT):
         ----------
         order : int
             Legendre polynomial order
+        sigma : float, default 1.0
+            Number of sigma levels for uncertainty (1.0 = 1σ, 2.0 = 2σ)
         uncertainty_type : str, default 'relative'
             Type of uncertainty: 'relative' (%) or 'absolute'
         label : str, optional
@@ -892,9 +895,12 @@ class MF34MT(MT):
             
         Examples
         --------
-        >>> # Extract uncertainty data from MF34MT
+        >>> # Extract 1-sigma uncertainty data from MF34MT
         >>> mf34_mt2 = endf.mf[34].mt[2]
         >>> unc_data = mf34_mt2.to_plot_data(order=1)
+        >>> 
+        >>> # Extract 2-sigma uncertainty data
+        >>> unc_2sigma = mf34_mt2.to_plot_data(order=1, sigma=2.0)
         >>> 
         >>> # Build a plot
         >>> from kika.plotting import PlotBuilder
@@ -912,6 +918,7 @@ class MF34MT(MT):
             isotope=isotope,
             mt=mt,
             order=order,
+            sigma=sigma,
             uncertainty_type=uncertainty_type,
             label=label,
             **styling_kwargs

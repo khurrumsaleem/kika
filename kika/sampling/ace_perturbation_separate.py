@@ -50,6 +50,7 @@ from kika._utils import temperature_to_suffix
 from kika.sampling.utils import (
     DualLogger, 
     _get_logger, 
+    _set_logger,
     load_covariance,
     _initialize_master_perturbation_matrix,
     _update_master_perturbation_matrix,
@@ -189,6 +190,7 @@ def perturb_seprate_ACE_files(
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_file = os.path.join(output_dir, f'ace_perturbation_{timestamp}.log')
     _logger = DualLogger(log_file)
+    _set_logger(_logger)
     
     # Console: Basic start message
     print(f"[INFO] Starting ACE perturbation job")

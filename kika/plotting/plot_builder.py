@@ -196,6 +196,7 @@ class PlotBuilder:
         self,
         data: Union[PlotData, Tuple[PlotData, Optional[Union[UncertaintyBand, PlotData]]]],
         uncertainty: Optional[Union[UncertaintyBand, PlotData]] = None,
+        sigma: Optional[float] = None,
         **styling_overrides
     ) -> 'PlotBuilder':
         """
@@ -206,13 +207,18 @@ class PlotBuilder:
         data : PlotData or tuple
             The data to plot. Can be either:
             - A PlotData object
-            - A tuple (PlotData, UncertaintyBand) as returned by to_plot_data with uncertainty=True
-            If a tuple is provided and uncertainty is None, the UncertaintyBand from the tuple will be used.
+            - A tuple (PlotData, UncertaintyBand/PlotData) as returned by to_plot_data
+            If a tuple is provided and uncertainty is None, the uncertainty from the tuple will be used.
         uncertainty : UncertaintyBand or PlotData, optional
             Uncertainty to plot with this data. Can be either:
             - UncertaintyBand object (will be plotted as shaded region)
             - PlotData object with uncertainty values (will be converted to band)
             If data is a tuple and this parameter is provided, this parameter takes precedence.
+        sigma : float, optional
+            Override the sigma level for uncertainty bands:
+            - None (default): use sigma from uncertainty data source
+            - 0: do not plot uncertainty band even if provided
+            - Any positive number: scale uncertainty by this sigma level
         **styling_overrides
             Styling overrides for this specific data (color, linestyle, etc.)
             
@@ -220,6 +226,18 @@ class PlotBuilder:
         -------
         PlotBuilder
             Self for method chaining
+            
+        Examples
+        --------
+        >>> # Basic usage with tuple from to_plot_data
+        >>> data, unc = endf.to_plot_data(mf=4, mt=2, order=1)
+        >>> builder.add_data(data, uncertainty=unc)
+        >>> 
+        >>> # Disable uncertainty plotting
+        >>> builder.add_data(data, uncertainty=unc, sigma=0)
+        >>> 
+        >>> # Plot with 2-sigma band
+        >>> builder.add_data(data, uncertainty=unc, sigma=2.0)
         """
         # Check for conflicts with heatmap data
         if self._heatmap_data is not None:
@@ -229,7 +247,7 @@ class PlotBuilder:
                 "Create separate PlotBuilder instances for heatmaps and line plots."
             )
         
-        # Handle tuple input from to_plot_data(uncertainty=True)
+        # Handle tuple input from to_plot_data
         if isinstance(data, tuple):
             if len(data) == 2:
                 plot_data, tuple_uncertainty = data
@@ -241,12 +259,30 @@ class PlotBuilder:
                 raise ValueError(f"Expected tuple of length 2, got {len(data)}")
         
         self._data_list.append(data)
-        self._custom_styling.append(styling_overrides)
+        # Remove 'sigma' from styling_overrides to avoid passing it to matplotlib
+        matplotlib_styling = {k: v for k, v in styling_overrides.items() if k != 'sigma'}
+        self._custom_styling.append(matplotlib_styling)
+        
+        # Handle sigma=0 case: skip uncertainty entirely
+        if sigma == 0:
+            uncertainty = None
         
         if uncertainty is not None:
             # Convert PlotData to UncertaintyBand if needed
             if isinstance(uncertainty, PlotData):
-                uncertainty = self._convert_plotdata_to_band(uncertainty, data)
+                uncertainty = self._convert_plotdata_to_band(uncertainty, data, sigma_override=sigma)
+            elif sigma is not None and isinstance(uncertainty, UncertaintyBand):
+                # If sigma override provided for UncertaintyBand, create new band with updated sigma
+                if uncertainty.is_relative():
+                    uncertainty = UncertaintyBand(
+                        x=uncertainty.x,
+                        relative_uncertainty=uncertainty.relative_uncertainty,
+                        sigma=sigma,
+                        color=uncertainty.color,
+                        alpha=uncertainty.alpha,
+                        label=uncertainty.label
+                    )
+                # For absolute bounds, we'd need to rescale - skip for now
             
             data_index = len(self._data_list) - 1
             self._uncertainty_bands.append((uncertainty, data_index))
@@ -862,7 +898,8 @@ class PlotBuilder:
             title_kwargs = {}
             if self._title_fontsize is not None:
                 title_kwargs["fontsize"] = self._title_fontsize
-            fig.suptitle(effective_title, y=0.985 if not has_uncertainties else 0.97, **title_kwargs)
+            # Higher y position to avoid overlap with rotated top axis labels
+            fig.suptitle(effective_title, y=1.02 if not has_uncertainties else 0.98, **title_kwargs)
 
         if self._tick_labelsize is not None:
             ax_heatmap.tick_params(axis='both', which='both', labelsize=self._tick_labelsize)
@@ -928,6 +965,8 @@ class PlotBuilder:
             return f"{v:.0e}"
 
         def _log_ticks_with_decades(edges_block: np.ndarray):
+            """Generate tick positions and labels for logarithmic energy scale.
+            Shows minor ticks (2-9 × 10^k) without labels, decade boundaries (10^k) with labels."""
             Emin = float(edges_block[0])
             Emax = float(edges_block[-1])
             kmin = int(np.ceil(np.log10(max(Emin, 1e-300))))
@@ -937,23 +976,27 @@ class PlotBuilder:
             vals = []
             labels = []
 
+            # Add Emin if not a decade boundary (tick mark only, no label)
             is_emin_decade = np.isclose(Emin, 10.0 ** np.round(np.log10(Emin)), rtol=1e-10)
             is_emax_decade = np.isclose(Emax, 10.0 ** np.round(np.log10(Emax)), rtol=1e-10)
             if not is_emin_decade:
                 vals.append(Emin)
-                labels.append(_fmt_sci_eV(Emin))
+                labels.append("")  # No label for boundary values
 
+            # Add decade boundaries (10^k) with labels and intermediate ticks (2-9 × 10^k) without labels
             for k in ks:
                 base = 10.0 ** k
-                for m in range(1, 10):
+                for m in range(1, 10):  # m = 1, 2, 3, ..., 9
                     v = m * base
                     if Emin <= v <= Emax:
                         vals.append(v)
+                        # Only label decade boundaries (m == 1)
                         labels.append(_fmt_sci_eV(v) if m == 1 else "")
 
+            # Add Emax if not a decade boundary and not already added (tick mark only, no label)
             if not is_emax_decade and (len(vals) == 0 or not np.isclose(vals[-1], Emax, rtol=1e-10)):
                 vals.append(Emax)
-                labels.append(_fmt_sci_eV(Emax))
+                labels.append("")  # No label for boundary values
 
             vals_arr = np.array(vals, dtype=float)
             if vals_arr.size == 0:
@@ -1071,7 +1114,7 @@ class PlotBuilder:
 
         ax_top.set_xlim(ax.get_xlim())
         ax_top.set_xticks(top_ticks)
-        ax_top.set_xticklabels(top_labels, fontsize=9, color=tick_grey)
+        ax_top.set_xticklabels(top_labels, fontsize=9, color=tick_grey, rotation=30, ha='left')
         ax_top.tick_params(axis='x', direction='out', length=3, colors=tick_grey, pad=2, top=True, bottom=False)
         ax_top.spines['top'].set_visible(True)
         ax_top.spines['top'].set_linewidth(0.6)
@@ -1087,13 +1130,12 @@ class PlotBuilder:
         ax_bottom.spines['bottom'].set_visible(False)
         ax_bottom.grid(False)
 
-        y_low, y_high = ax.get_ylim()
-        mirrored = [(y_low + y_high) - t for t in side_ticks]
-        right_labels = list(reversed(side_labels))
-
+        # For the right/left Y-axis: use same tick positions as X (for symmetric matrix)
+        # The Y-axis is inverted (origin='upper'), so low energy at top, high energy at bottom
+        # This matches X-axis convention: low energy on left, high energy on right
         ax_right.set_ylim(ax.get_ylim())
-        ax_right.set_yticks(mirrored)
-        ax_right.set_yticklabels(right_labels, fontsize=9, color=tick_grey)
+        ax_right.set_yticks(side_ticks)
+        ax_right.set_yticklabels(side_labels, fontsize=9, color=tick_grey)
         ax_right.tick_params(axis='y', direction='out', length=3, colors=tick_grey, pad=2, right=True, left=False)
         ax_right.spines['right'].set_visible(True)
         ax_right.spines['right'].set_linewidth(0.6)
@@ -1103,8 +1145,8 @@ class PlotBuilder:
         ax_left.set_ylim(ax.get_ylim())
         ax_left.yaxis.set_ticks_position('left')
         ax_left.spines['left'].set_position(('outward', 0))
-        ax_left.set_yticks(mirrored)
-        ax_left.set_yticklabels([''] * len(mirrored))
+        ax_left.set_yticks(side_ticks)
+        ax_left.set_yticklabels([''] * len(side_ticks))
         ax_left.tick_params(axis='y', direction='out', length=2, colors=tick_grey, pad=2, left=True, right=False)
         ax_left.spines['left'].set_visible(False)
         ax_left.grid(False)
@@ -1134,6 +1176,8 @@ class PlotBuilder:
             return f"{v:.0e}"
 
         def _log_ticks_with_decades(edges_block: np.ndarray):
+            """Generate tick positions and labels for logarithmic energy scale.
+            Shows minor ticks (2-9 × 10^k) without labels, decade boundaries (10^k) with labels."""
             Emin = float(edges_block[0])
             Emax = float(edges_block[-1])
             kmin = int(np.ceil(np.log10(max(Emin, 1e-300))))
@@ -1143,23 +1187,27 @@ class PlotBuilder:
             vals: list[float] = []
             labels: list[str] = []
 
+            # Add Emin if not a decade boundary (tick mark only, no label)
             is_emin_decade = np.isclose(Emin, 10.0 ** np.round(np.log10(Emin)), rtol=1e-10)
             is_emax_decade = np.isclose(Emax, 10.0 ** np.round(np.log10(Emax)), rtol=1e-10)
             if not is_emin_decade:
                 vals.append(Emin)
-                labels.append(_fmt_sci_eV(Emin))
+                labels.append("")  # No label for boundary values
 
+            # Add decade boundaries (10^k) with labels and intermediate ticks (2-9 × 10^k) without labels
             for k in ks:
                 base = 10.0 ** k
-                for m in range(1, 10):
+                for m in range(1, 10):  # m = 1, 2, 3, ..., 9
                     v = m * base
                     if Emin <= v <= Emax:
                         vals.append(v)
+                        # Only label decade boundaries (m == 1)
                         labels.append(_fmt_sci_eV(v) if m == 1 else "")
 
+            # Add Emax if not a decade boundary and not already added (tick mark only, no label)
             if not is_emax_decade and (len(vals) == 0 or not np.isclose(vals[-1], Emax, rtol=1e-10)):
                 vals.append(Emax)
-                labels.append(_fmt_sci_eV(Emax))
+                labels.append("")  # No label for boundary values
 
             vals_arr = np.array(vals, dtype=float)
             if vals_arr.size == 0:
@@ -1291,7 +1339,7 @@ class PlotBuilder:
 
         ax_top.set_xlim(ax.get_xlim())
         ax_top.set_xticks(top_ticks)
-        ax_top.set_xticklabels(top_labels, fontsize=9, color=tick_grey)
+        ax_top.set_xticklabels(top_labels, fontsize=9, color=tick_grey, rotation=30, ha='left')
         ax_top.tick_params(axis='x', direction='out', length=3, colors=tick_grey, pad=2, top=True, bottom=False)
         ax_top.spines['top'].set_visible(True)
         ax_top.spines['top'].set_linewidth(0.6)
@@ -1307,15 +1355,12 @@ class PlotBuilder:
         ax_bottom.spines['bottom'].set_visible(False)
         ax_bottom.grid(False)
 
-        y_low, y_high = (ax.get_ylim()[1], ax.get_ylim()[0]) if ax.get_ylim()[0] < ax.get_ylim()[1] else ax.get_ylim()
-        if getattr(data, "y_edges", None) is not None:
-            y_low, y_high = data.y_edges[0], data.y_edges[-1]
-        mirrored = [(y_low + y_high) - t for t in side_ticks]
-        right_labels = list(reversed(side_labels))
-
+        # For the right/left Y-axis: use same tick positions as X (for symmetric matrix)
+        # The Y-axis is inverted (origin='upper'), so low energy at top, high energy at bottom
+        # This matches X-axis convention: low energy on left, high energy on right
         ax_right.set_ylim(ax.get_ylim())
-        ax_right.set_yticks(mirrored)
-        ax_right.set_yticklabels(right_labels, fontsize=9, color=tick_grey)
+        ax_right.set_yticks(side_ticks)
+        ax_right.set_yticklabels(side_labels, fontsize=9, color=tick_grey)
         ax_right.tick_params(axis='y', direction='out', length=3, colors=tick_grey, pad=2, right=True, left=False)
         ax_right.spines['right'].set_visible(True)
         ax_right.spines['right'].set_linewidth(0.6)
@@ -1325,8 +1370,8 @@ class PlotBuilder:
         ax_left.set_ylim(ax.get_ylim())
         ax_left.yaxis.set_ticks_position('left')
         ax_left.spines['left'].set_position(('outward', 0))
-        ax_left.set_yticks(mirrored)
-        ax_left.set_yticklabels([''] * len(mirrored))
+        ax_left.set_yticks(side_ticks)
+        ax_left.set_yticklabels([''] * len(side_ticks))
         ax_left.tick_params(axis='y', direction='out', length=2, colors=tick_grey, pad=2, left=True, right=False)
         ax_left.spines['left'].set_visible(False)
         ax_left.grid(False)
@@ -1946,7 +1991,8 @@ class PlotBuilder:
     def _convert_plotdata_to_band(
         self,
         uncertainty_data: PlotData,
-        nominal_data: PlotData
+        nominal_data: PlotData,
+        sigma_override: Optional[float] = None
     ) -> UncertaintyBand:
         """
         Convert uncertainty PlotData to UncertaintyBand.
@@ -1957,12 +2003,20 @@ class PlotBuilder:
             PlotData containing uncertainty values (MultigroupUncertaintyPlotData or LegendreUncertaintyPlotData)
         nominal_data : PlotData
             The nominal data that these uncertainties correspond to
+        sigma_override : float, optional
+            Override sigma value. If None, uses sigma from uncertainty_data if available, else 1.0.
             
         Returns
         -------
         UncertaintyBand
             Converted uncertainty band object
         """
+        # Determine sigma: use override if provided, else get from data, else default to 1.0
+        if sigma_override is not None:
+            sigma = sigma_override
+        else:
+            sigma = getattr(uncertainty_data, 'sigma', 1.0)
+        
         # Check if this is a recognized uncertainty PlotData type
         if isinstance(uncertainty_data, (MultigroupUncertaintyPlotData, LegendreUncertaintyPlotData)):
             # These PlotData types now store uncertainties at bin edges (n+1 points)
@@ -1971,7 +2025,9 @@ class PlotBuilder:
             uncertainty_type = getattr(uncertainty_data, 'uncertainty_type', 'relative')
             
             if uncertainty_type == 'relative':
-                # y values are in percentage - convert to fractional (0.05 for 5%)
+                # y values are in percentage (already scaled by sigma in to_plot_data)
+                # Convert to fractional for UncertaintyBand
+                # Since sigma was already applied in to_plot_data, we use sigma=1.0 in the band
                 rel_unc = np.array(uncertainty_data.y) / 100.0
                 unc_x = np.array(uncertainty_data.x)
                 nom_x = np.array(nominal_data.x)

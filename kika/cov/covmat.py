@@ -1350,6 +1350,7 @@ class CovMat:
         show_energy_ticks: bool = True,
         scale: str = "log",
         energy_range: Optional[Tuple[float, float]] = None,
+        title: Optional[str] = "default",
         **imshow_kwargs
     ) -> plt.Figure:
         """
@@ -1390,6 +1391,9 @@ class CovMat:
             Energy axis scale: "log"/"logarithmic" or "lin"/"linear"
         energy_range : tuple of float, optional
             Energy range (min, max) for filtering. Values in eV.
+        title : str or None, default "default"
+            Plot title. If "default", auto-generates from nuclide and MT.
+            If a string, uses that as the title. If None, suppresses the title.
         **imshow_kwargs
             Additional arguments passed to imshow (deprecated)
 
@@ -1414,6 +1418,7 @@ class CovMat:
             show_energy_ticks=show_energy_ticks,
             scale=scale,
             energy_range=energy_range,
+            title=title,
         )
     
     
