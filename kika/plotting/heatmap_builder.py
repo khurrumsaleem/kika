@@ -65,8 +65,8 @@ class HeatmapBuilder(PlotBuilder):
     def __init__(
         self,
         style: str = 'light',
-        figsize: Tuple[float, float] = (8, 6),
-        dpi: int = 100,
+        figsize: Tuple[float, float] = (8, 8),
+        dpi: int = 150,
         ax: Optional[plt.Axes] = None,
         projection: Optional[str] = None,
         font_family: str = 'serif',
@@ -137,6 +137,268 @@ class HeatmapBuilder(PlotBuilder):
         n_blocks = len(mts) if mts else len(legendre)
 
         return n_blocks > 1
+
+    def _crop_to_energy_range(
+        self,
+        heatmap_data: 'HeatmapPlotData',
+        energy_lim: Tuple[float, float],
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any], Optional[np.ndarray], Optional[Dict]]:
+        """
+        Unified method to crop heatmap data to energy range.
+        Works for both single-block and multi-block heatmaps.
+
+        Parameters
+        ----------
+        heatmap_data : HeatmapPlotData
+            The heatmap data containing matrix, block info, and energy grids
+        energy_lim : tuple
+            (min_energy, max_energy) for filtering
+
+        Returns
+        -------
+        tuple
+            (cropped_matrix, new_x_edges, new_y_edges, new_block_info,
+             cropped_energy_grid, cropped_uncertainty_data)
+        """
+        from .plot_data import CovarianceHeatmapData, MF34HeatmapData
+
+        # Get the matrix data
+        if hasattr(heatmap_data, 'get_masked_data'):
+            M = heatmap_data.get_masked_data()
+        else:
+            M = heatmap_data.matrix_data
+
+        lo, hi = energy_lim
+        if lo > hi:
+            lo, hi = hi, lo
+
+        def _find_groups_in_range(energy_grid: np.ndarray) -> Tuple[np.ndarray, int, int]:
+            """Find indices of groups that overlap with energy range."""
+            G = len(energy_grid) - 1
+            in_range = []
+            for i in range(G):
+                e_lo_bin = energy_grid[i]
+                e_hi_bin = energy_grid[i + 1]
+                if (e_hi_bin >= lo) and (e_lo_bin <= hi):
+                    in_range.append(i)
+            if not in_range:
+                return np.array([], dtype=int), 0, 0
+            return np.array(in_range, dtype=int), in_range[0], in_range[-1] + 1
+
+        scale = getattr(heatmap_data, 'scale', 'log')
+        uncertainty_data = getattr(heatmap_data, 'uncertainty_data', None)
+
+        # Handle CovarianceHeatmapData
+        if isinstance(heatmap_data, CovarianceHeatmapData):
+            energy_grid = heatmap_data.energy_grid
+            if energy_grid is None:
+                return M, heatmap_data.x_edges, heatmap_data.y_edges, {}, None, uncertainty_data
+
+            block_info = getattr(heatmap_data, 'block_info', None) or {}
+            mts = block_info.get('mts', [])
+            G = block_info.get('G', len(energy_grid) - 1)
+            is_multi_block = len(mts) > 1
+
+            # Find which groups are in range
+            groups_idx, start_g, end_g = _find_groups_in_range(energy_grid)
+            if len(groups_idx) == 0:
+                return M, heatmap_data.x_edges, heatmap_data.y_edges, block_info, None, uncertainty_data
+
+            G_new = len(groups_idx)
+            cropped_energy_grid = energy_grid[start_g:end_g + 1]
+
+            if is_multi_block:
+                # Multi-block: crop each block
+                cropped_blocks = []
+                for i, mt in enumerate(mts):
+                    block_start = i * G
+                    row_indices = block_start + groups_idx
+                    block_rows = []
+                    for j, mt2 in enumerate(mts):
+                        block_start_col = j * G
+                        col_indices = block_start_col + groups_idx
+                        sub_block = M[np.ix_(row_indices, col_indices)]
+                        block_rows.append(sub_block)
+                    cropped_blocks.append(np.hstack(block_rows))
+                cropped_M = np.vstack(cropped_blocks)
+
+                # Calculate coordinate edges for multi-block
+                if scale == 'log':
+                    cropped_edges_local = np.log10(np.maximum(cropped_energy_grid, 1e-300))
+                    cropped_edges_local = cropped_edges_local - cropped_edges_local[0]
+                else:
+                    cropped_edges_local = cropped_energy_grid - cropped_energy_grid[0]
+
+                width = cropped_edges_local[-1] if len(cropped_edges_local) > 1 else 1.0
+
+                new_x_edges_parts = []
+                new_energy_ranges = {}
+                for i, mt in enumerate(mts):
+                    block_offset = i * width
+                    if i == 0:
+                        new_x_edges_parts.append(cropped_edges_local + block_offset)
+                    else:
+                        new_x_edges_parts.append((cropped_edges_local + block_offset)[1:])
+                    new_energy_ranges[mt] = (block_offset, block_offset + width)
+
+                new_x_edges = np.concatenate(new_x_edges_parts)
+                new_y_edges = new_x_edges.copy()
+
+                new_block_info = {
+                    'mts': mts,
+                    'G': G_new,
+                    'energy_ranges': new_energy_ranges,
+                }
+            else:
+                # Single-block: simple crop
+                cropped_M = M[np.ix_(groups_idx, groups_idx)]
+
+                if scale == 'log':
+                    new_x_edges = np.log10(np.maximum(cropped_energy_grid, 1e-300))
+                    new_x_edges = new_x_edges - new_x_edges[0]
+                else:
+                    new_x_edges = cropped_energy_grid - cropped_energy_grid[0]
+
+                new_y_edges = new_x_edges.copy()
+                new_block_info = block_info.copy() if block_info else {}
+                if new_block_info:
+                    new_block_info['G'] = G_new
+
+            # Crop uncertainty data
+            cropped_uncertainty = None
+            if uncertainty_data:
+                cropped_uncertainty = {}
+                for key, sigma in uncertainty_data.items():
+                    if len(groups_idx) <= len(sigma):
+                        cropped_uncertainty[key] = sigma[groups_idx]
+                    else:
+                        cropped_uncertainty[key] = sigma
+
+            return cropped_M, new_x_edges, new_y_edges, new_block_info, cropped_energy_grid, cropped_uncertainty
+
+        # Handle MF34HeatmapData
+        elif isinstance(heatmap_data, MF34HeatmapData):
+            block_info = getattr(heatmap_data, 'block_info', None) or {}
+            legendre_list = block_info.get('legendre_coeffs', heatmap_data.legendre_coeffs)
+            energy_grids = heatmap_data.energy_grids
+            is_multi_block = len(legendre_list) > 1
+
+            if not energy_grids or len(legendre_list) == 0:
+                return M, heatmap_data.x_edges, heatmap_data.y_edges, block_info, None, uncertainty_data
+
+            # Get the first energy grid as reference
+            first_L = legendre_list[0]
+            first_grid = energy_grids.get(first_L)
+            if first_grid is None:
+                return M, heatmap_data.x_edges, heatmap_data.y_edges, block_info, None, uncertainty_data
+
+            groups_idx, start_g, end_g = _find_groups_in_range(first_grid)
+            if len(groups_idx) == 0:
+                return M, heatmap_data.x_edges, heatmap_data.y_edges, block_info, None, uncertainty_data
+
+            cropped_energy_grid = first_grid[start_g:end_g + 1]
+            G_new = len(groups_idx)
+
+            if is_multi_block and heatmap_data.is_diagonal:
+                # Multi-block diagonal MF34
+                ranges_dict = block_info.get('ranges', {})
+                cropped_blocks_diag = []
+                new_ranges = {}
+                new_energy_ranges = {}
+                new_G_per_L = {}
+                new_x_edges_parts = []
+                current_pos = 0.0
+
+                for l_val in legendre_list:
+                    energy_grid = energy_grids.get(l_val)
+                    idx_range = ranges_dict.get(l_val)
+
+                    if energy_grid is None:
+                        continue
+
+                    groups_idx_L, start_g_L, end_g_L = _find_groups_in_range(energy_grid)
+                    if len(groups_idx_L) == 0:
+                        continue
+
+                    G_l_new = len(groups_idx_L)
+                    new_G_per_L[l_val] = G_l_new
+
+                    cropped_grid = energy_grid[start_g_L:end_g_L + 1]
+
+                    if idx_range is not None:
+                        start_idx, end_idx = idx_range
+                        block_indices = start_idx + groups_idx_L
+                        sub_block = M[np.ix_(block_indices, block_indices)]
+                    else:
+                        sub_block = np.zeros((G_l_new, G_l_new))
+
+                    cropped_blocks_diag.append(sub_block)
+
+                    if scale == 'log':
+                        edges_local = np.log10(np.maximum(cropped_grid, 1e-300))
+                        edges_local = edges_local - edges_local[0]
+                    else:
+                        edges_local = cropped_grid - cropped_grid[0]
+
+                    width = edges_local[-1] if len(edges_local) > 1 else 1.0
+                    edges_global = edges_local + current_pos
+
+                    if len(new_x_edges_parts) == 0:
+                        new_x_edges_parts.append(edges_global)
+                    else:
+                        new_x_edges_parts.append(edges_global[1:])
+
+                    new_ranges[l_val] = (len(cropped_blocks_diag) - 1, len(cropped_blocks_diag))
+                    new_energy_ranges[l_val] = (current_pos, current_pos + width)
+                    current_pos += width
+
+                if not cropped_blocks_diag:
+                    return M, heatmap_data.x_edges, heatmap_data.y_edges, block_info, None, uncertainty_data
+
+                total_size = sum(b.shape[0] for b in cropped_blocks_diag)
+                cropped_M = np.zeros((total_size, total_size))
+                pos = 0
+                for block in cropped_blocks_diag:
+                    size = block.shape[0]
+                    cropped_M[pos:pos+size, pos:pos+size] = block
+                    pos += size
+
+                new_x_edges = np.concatenate(new_x_edges_parts) if new_x_edges_parts else heatmap_data.x_edges
+                new_y_edges = new_x_edges.copy()
+
+                new_block_info = {
+                    'legendre_coeffs': legendre_list,
+                    'ranges': new_ranges,
+                    'energy_ranges': new_energy_ranges,
+                    'G_per_L': new_G_per_L,
+                }
+            else:
+                # Single-block or non-diagonal MF34
+                cropped_M = M[np.ix_(groups_idx, groups_idx)]
+
+                if scale == 'log':
+                    new_x_edges = np.log10(np.maximum(cropped_energy_grid, 1e-300))
+                    new_x_edges = new_x_edges - new_x_edges[0]
+                else:
+                    new_x_edges = cropped_energy_grid - cropped_energy_grid[0]
+
+                new_y_edges = new_x_edges.copy()
+                new_block_info = block_info.copy() if block_info else {}
+
+            # Crop uncertainty data
+            cropped_uncertainty = None
+            if uncertainty_data:
+                cropped_uncertainty = {}
+                for key, sigma in uncertainty_data.items():
+                    if len(groups_idx) <= len(sigma):
+                        cropped_uncertainty[key] = sigma[groups_idx]
+                    else:
+                        cropped_uncertainty[key] = sigma
+
+            return cropped_M, new_x_edges, new_y_edges, new_block_info, cropped_energy_grid, cropped_uncertainty
+
+        # Fallback for unknown types
+        return M, heatmap_data.x_edges, heatmap_data.y_edges, {}, None, uncertainty_data
 
     def _crop_blocks_to_energy_range(
         self,
@@ -548,104 +810,15 @@ class HeatmapBuilder(PlotBuilder):
             len(heatmap_data.uncertainty_data) > 0
         )
 
-        # Pre-compute helper to translate energy limits into heatmap axes coordinates
+        # Check for symmetric matrix (covariance/correlation matrices)
         symmetric_matrix = isinstance(heatmap_data, CovarianceHeatmapData) or (
             isinstance(heatmap_data, MF34HeatmapData) and getattr(heatmap_data, "is_diagonal", False))
-        x_edges_for_limits = getattr(heatmap_data, "x_edges", None)
-        y_edges_for_limits = getattr(heatmap_data, "y_edges", None)
-        extent = getattr(heatmap_data, "extent", None)
-        if x_edges_for_limits is None and extent is not None:
-            x_edges_for_limits = np.asarray(extent[:2], dtype=float)
-        if y_edges_for_limits is None and extent is not None:
-            y_edges_for_limits = np.asarray(extent[2:], dtype=float)
 
-        def _transform_energy_value(val: float) -> float:
-            """Map raw energy values onto the transformed axis used by the heatmap."""
-            if getattr(heatmap_data, "scale", None) == "log":
-                return float(np.log10(max(float(val), 1e-300)))
-            return float(val)
-
-        def _convert_limits_to_axis(
-            lim: Optional[Tuple[float, float]],
-            axis_edges: Optional[np.ndarray],
-            block_info: Optional[Dict] = None
-        ) -> Optional[Tuple[float, float]]:
-            """Convert user-provided energy limits into the heatmap axis coordinates.
-            
-            For multi-block heatmaps, this converts the energy limits to coordinates
-            within EACH block and returns the combined visible range.
-            """
-            if lim is None or axis_edges is None:
-                return lim
-
-            # Handle both CovarianceHeatmapData (energy_grid) and MF34HeatmapData (energy_grids)
-            energy_grid = getattr(heatmap_data, "energy_grid", None)
-            if energy_grid is None:
-                # Try MF34HeatmapData's energy_grids dict
-                energy_grids = getattr(heatmap_data, "energy_grids", None)
-                if energy_grids and len(energy_grids) > 0:
-                    # Use the first available energy grid from the dict
-                    first_key = next(iter(energy_grids.keys()))
-                    energy_grid = energy_grids[first_key]
-
-            if energy_grid is None or len(energy_grid) == 0:
-                return lim
-
-            lo_req, hi_req = float(lim[0]), float(lim[1])
-            if not np.isfinite(lo_req) or not np.isfinite(hi_req):
-                return lim
-            if hi_req < lo_req:
-                lo_req, hi_req = hi_req, lo_req
-
-            axis_edges = np.asarray(axis_edges, dtype=float)
-            energy_edges = np.asarray(energy_grid, dtype=float)
-
-            # Transform full energy grid to axis space (log/linear)
-            transformed_edges = np.asarray([_transform_energy_value(v) for v in energy_edges], dtype=float)
-
-            base_span = transformed_edges[-1] - transformed_edges[0]
-            axis_span = axis_edges[-1] - axis_edges[0]
-            if not (np.isfinite(base_span) and np.isfinite(axis_span)) or base_span <= 0 or axis_span <= 0:
-                return lim
-
-            # Transform the requested energy limits
-            lo_transformed = _transform_energy_value(lo_req)
-            hi_transformed = _transform_energy_value(hi_req)
-            
-            # Calculate fractional positions within the energy range
-            frac_lo = (lo_transformed - transformed_edges[0]) / base_span
-            frac_hi = (hi_transformed - transformed_edges[0]) / base_span
-            
-            # Clamp fractions to [0, 1]
-            frac_lo = max(0.0, min(1.0, frac_lo))
-            frac_hi = max(0.0, min(1.0, frac_hi))
-            
-            # Check if this is a multi-block heatmap
-            is_multiblock = axis_span > base_span * 1.05
-            
-            if is_multiblock and block_info is not None:
-                # For multi-block heatmaps, axis-based zooming is NOT supported.
-                # Each block maps the same energy range to different coordinate spaces,
-                # so a single (lo, hi) axis limit cannot represent the disjoint visible
-                # regions. Returning None keeps the full axis range for all blocks,
-                # while energy limits are still applied to tick filtering via the
-                # stored energy_x_lim/energy_y_lim values.
-                return None
-            else:
-                # Single-block heatmap: simple linear mapping
-                lo_snap = axis_edges[0] + frac_lo * axis_span
-                hi_snap = axis_edges[0] + frac_hi * axis_span
-
-            if hi_snap < lo_snap:
-                lo_snap, hi_snap = hi_snap, lo_snap
-
-            return (float(lo_snap), float(hi_snap))
-
-        # Apply limits with symmetric matrix handling
+        # Get user-specified energy limits
         user_x_lim = getattr(self, "_x_lim", None)
         user_y_lim = getattr(self, "_y_lim", None)
 
-        # For symmetric matrices, enforce symmetry
+        # For symmetric matrices, enforce symmetry of limits
         if symmetric_matrix:
             if user_x_lim is None and user_y_lim is not None:
                 user_x_lim = user_y_lim
@@ -657,15 +830,8 @@ class HeatmapBuilder(PlotBuilder):
                 user_x_lim = (lo, hi)
                 user_y_lim = (lo, hi)
 
-        # Get block_info for multi-block limit conversion
-        block_info = getattr(heatmap_data, 'block_info', None)
-        
-        resolved_x_lim = _convert_limits_to_axis(user_x_lim, x_edges_for_limits, block_info)
-        resolved_y_lim = _convert_limits_to_axis(user_y_lim, y_edges_for_limits, block_info)
-        
-        # Store the original energy limits for tick filtering
-        energy_x_lim = user_x_lim
-        energy_y_lim = user_y_lim
+        # Determine the effective energy limit for cropping
+        energy_lim = user_x_lim if user_x_lim is not None else user_y_lim
 
         # Create figure and layout
         fig = plt.figure(figsize=figsize, dpi=dpi)
@@ -691,27 +857,25 @@ class HeatmapBuilder(PlotBuilder):
             ax_heatmap = fig.add_subplot(111)
             uncertainty_axes = None
 
-        # Get masked data
-        if hasattr(heatmap_data, 'get_masked_data'):
-            M = heatmap_data.get_masked_data()
-        else:
-            M = heatmap_data.matrix_data
-
-        # For multi-block heatmaps with energy limits, crop each block to show
-        # only the energy range, then recalculate coordinates so zoomed data
-        # fills the block space
+        # Initialize cropped data variables
         use_cropped_data = False
         cropped_x_edges = None
         cropped_y_edges = None
         cropped_block_info = None
         cropped_energy_grid = None
+        cropped_uncertainty_data = None
 
-        if self._is_multi_block(heatmap_data) and (energy_x_lim is not None or energy_y_lim is not None):
-            # Use x_lim for both axes on symmetric matrices
-            effective_energy_lim = energy_x_lim if energy_x_lim is not None else energy_y_lim
+        # Get the matrix data (will be replaced if cropping)
+        if hasattr(heatmap_data, 'get_masked_data'):
+            M = heatmap_data.get_masked_data()
+        else:
+            M = heatmap_data.matrix_data
+
+        # If energy limits are set, crop the data (works for both single and multi-block)
+        if energy_lim is not None:
             (cropped_M, cropped_x_edges, cropped_y_edges,
-             cropped_block_info, cropped_energy_grid) = self._crop_blocks_to_energy_range(
-                M, heatmap_data, effective_energy_lim
+             cropped_block_info, cropped_energy_grid, cropped_uncertainty_data) = self._crop_to_energy_range(
+                heatmap_data, energy_lim
             )
             if cropped_M is not None and cropped_M.size > 0:
                 M = cropped_M
@@ -753,16 +917,9 @@ class HeatmapBuilder(PlotBuilder):
             X, Y = np.meshgrid(plot_x_edges, plot_y_edges)
             im = ax_heatmap.pcolormesh(X, Y, M, cmap=cmap, norm=norm, shading="flat")
 
-            default_xlim = (plot_x_edges[0], plot_x_edges[-1])
-            default_ylim = (plot_y_edges[0], plot_y_edges[-1])
-
-            # For cropped multi-block, use the new edges' full range
-            if use_cropped_data:
-                x_limits = default_xlim
-                y_limits = default_ylim
-            else:
-                x_limits = resolved_x_lim if resolved_x_lim is not None else default_xlim
-                y_limits = resolved_y_lim if resolved_y_lim is not None else default_ylim
+            # Always use full extent of (cropped) data
+            x_limits = (plot_x_edges[0], plot_x_edges[-1])
+            y_limits = (plot_y_edges[0], plot_y_edges[-1])
 
             ax_heatmap.set_xlim(x_limits)
             ax_heatmap.set_ylim(y_limits[1], y_limits[0])
@@ -777,10 +934,8 @@ class HeatmapBuilder(PlotBuilder):
                 extent=heatmap_data.extent,
             )
 
-            default_xlim = heatmap_data.extent[:2]
-            default_ylim = heatmap_data.extent[2:]
-            x_limits = resolved_x_lim if resolved_x_lim is not None else default_xlim
-            y_limits = resolved_y_lim if resolved_y_lim is not None else default_ylim
+            x_limits = heatmap_data.extent[:2]
+            y_limits = heatmap_data.extent[2:]
 
             ax_heatmap.set_xlim(x_limits)
             ax_heatmap.set_ylim(y_limits)
@@ -818,26 +973,13 @@ class HeatmapBuilder(PlotBuilder):
                 full_xlim, full_ylim
             )
         elif isinstance(heatmap_data, CovarianceHeatmapData):
+            # No energy filtering needed - data is already cropped (or not limited)
             pending_block_labels = self._setup_covariance_heatmap_ticks(fig, ax_heatmap, heatmap_data, full_xlim, full_ylim,
-                                                  energy_x_lim, energy_y_lim)
+                                                  None, None)
         elif isinstance(heatmap_data, MF34HeatmapData):
+            # No energy filtering needed - data is already cropped (or not limited)
             pending_block_labels = self._setup_mf34_heatmap_ticks(fig, ax_heatmap, heatmap_data, full_xlim, full_ylim,
-                                           energy_x_lim, energy_y_lim)
-
-        # Re-apply user limits after tick setup (skip for cropped data - it uses full cropped range)
-        if not use_cropped_data:
-            if resolved_x_lim is not None:
-                ax_heatmap.set_xlim(resolved_x_lim)
-            if resolved_y_lim is not None:
-                if getattr(heatmap_data, "x_edges", None) is not None:
-                    ax_heatmap.set_ylim(resolved_y_lim[1], resolved_y_lim[0])
-                else:
-                    ax_heatmap.set_ylim(resolved_y_lim)
-            elif symmetric_matrix and resolved_x_lim is not None:
-                if getattr(heatmap_data, "x_edges", None) is not None:
-                    ax_heatmap.set_ylim(resolved_x_lim[1], resolved_x_lim[0])
-                else:
-                    ax_heatmap.set_ylim(resolved_x_lim)
+                                           None, None)
 
         # Draw grid lines separating MT/L blocks
         if use_cropped_data and cropped_block_info:
@@ -863,7 +1005,7 @@ class HeatmapBuilder(PlotBuilder):
             title_kwargs = {}
             if self._title_fontsize is not None:
                 title_kwargs["fontsize"] = self._title_fontsize
-            title_y = 0.92 if has_uncertainties else 1.02
+            title_y = 0.95 if has_uncertainties else 1.05
             fig.suptitle(effective_title, y=title_y, **title_kwargs)
 
         if self._tick_labelsize is not None:
@@ -872,14 +1014,15 @@ class HeatmapBuilder(PlotBuilder):
         # Draw uncertainty panels if requested
         if has_uncertainties and uncertainty_axes is not None:
             if use_cropped_data:
-                # For cropped multi-block, pass cropped info and full cropped range as limits
+                # For cropped data, pass cropped info and energy grid
                 cropped_xlim = (cropped_x_edges[0], cropped_x_edges[-1]) if cropped_x_edges is not None else None
                 self._draw_uncertainty_panels_cropped(
                     uncertainty_axes, heatmap_data, cropped_block_info,
-                    cropped_energy_grid, energy_x_lim, cropped_xlim
+                    cropped_energy_grid, energy_lim, cropped_xlim
                 )
             else:
-                self._draw_uncertainty_panels(uncertainty_axes, heatmap_data, ax_heatmap, resolved_x_lim)
+                # No limits when not cropped
+                self._draw_uncertainty_panels(uncertainty_axes, heatmap_data, ax_heatmap, None)
 
         # Calculate number of MTs/blocks for layout adjustment
         if isinstance(heatmap_data, CovarianceHeatmapData) and heatmap_data.block_info:
@@ -889,9 +1032,9 @@ class HeatmapBuilder(PlotBuilder):
         else:
             num_blocks = 1
 
-        # Bottom margin configuration
+        # Bottom margin configuration (extra space for block labels)
         extra_margin = max(0, num_blocks - 1) * 0.015
-        bottom_margin = min(0.12 + extra_margin, 0.26)
+        bottom_margin = min(0.14 + extra_margin, 0.28)
 
         if has_uncertainties:
             fig.subplots_adjust(left=0.12, right=0.94, bottom=bottom_margin, top=0.90)
@@ -1623,6 +1766,51 @@ class HeatmapBuilder(PlotBuilder):
                 ax_u.text(x_label, y, lbl, ha="left", va="center",
                          color=tick_grey, fontsize=8, alpha=0.9, zorder=2)
 
+        def _draw_xgrid_inside(ax_u, energy_grid, scale, xr):
+            """Draw vertical grid lines at decade boundaries."""
+            if energy_grid is None or len(energy_grid) < 2:
+                return
+
+            e_min, e_max = float(energy_grid.min()), float(energy_grid.max())
+
+            if scale == 'log':
+                log_e_min = np.log10(np.maximum(e_min, 1e-300))
+                log_e_max = np.log10(e_max)
+                log_span = log_e_max - log_e_min
+
+                if log_span <= 0:
+                    return
+
+                decade_min = int(np.floor(log_e_min))
+                decade_max = int(np.ceil(log_e_max))
+
+                # Calculate axis span (transformed coordinates)
+                axis_span = xr[1] - xr[0]
+
+                for decade in range(decade_min, decade_max + 1):
+                    e = 10**decade
+                    if e_min <= e <= e_max:
+                        # Map to transformed coordinate
+                        frac = (np.log10(e) - log_e_min) / log_span
+                        pos = xr[0] + frac * axis_span
+                        ax_u.axvline(pos, color=tick_grey, lw=0.6, alpha=0.35, zorder=0)
+            else:
+                # Linear scale: use nice tick values
+                from matplotlib.ticker import MaxNLocator
+                locator = MaxNLocator(nbins=6, steps=[1, 2, 5, 10])
+                tick_energies = locator.tick_values(e_min, e_max)
+                tick_energies = tick_energies[(tick_energies >= e_min) & (tick_energies <= e_max)]
+
+                energy_span = e_max - e_min
+                if energy_span <= 0:
+                    return
+
+                axis_span = xr[1] - xr[0]
+                for e in tick_energies:
+                    frac = (e - e_min) / energy_span
+                    pos = xr[0] + frac * axis_span
+                    ax_u.axvline(pos, color=tick_grey, lw=0.6, alpha=0.35, zorder=0)
+
         keys = sorted(uncertainty_data.keys())
 
         if isinstance(heatmap_data, MF34HeatmapData):
@@ -1685,6 +1873,8 @@ class HeatmapBuilder(PlotBuilder):
                     ax_u.set_yticks([])
 
                     _draw_ygrid_inside(ax_u, (0.0, xs_local[-1]), ax_u.get_ylim()[1])
+                    if raw_grid is not None:
+                        _draw_xgrid_inside(ax_u, raw_grid, heatmap_data.scale, (0.0, xs_local[-1]))
 
                     if i == 0:
                         ax_u.set_ylabel('Unc. (%)', fontsize=10, color='black')
@@ -1731,6 +1921,8 @@ class HeatmapBuilder(PlotBuilder):
                 ax_u.set_yticks([])
 
                 _draw_ygrid_inside(ax_u, (0.0, xs_local[-1]), ax_u.get_ylim()[1])
+                if raw_grid is not None:
+                    _draw_xgrid_inside(ax_u, raw_grid, heatmap_data.scale, (0.0, xs_local[-1]))
 
                 ax_u.set_ylabel('Unc. (%)', fontsize=10)
 
@@ -1790,6 +1982,8 @@ class HeatmapBuilder(PlotBuilder):
 
                 if xs_edges.size >= 2:
                     _draw_ygrid_inside(ax_unc, (xs_edges[0], xs_edges[-1]), ax_unc.get_ylim()[1])
+                    if energy_grid is not None:
+                        _draw_xgrid_inside(ax_unc, energy_grid, heatmap_data.scale, (xs_edges[0], xs_edges[-1]))
 
                 if i == 0:
                     ax_unc.set_ylabel('Unc. (%)', fontsize=10, color='black')
@@ -1837,6 +2031,48 @@ class HeatmapBuilder(PlotBuilder):
                 lbl = f"{y:g}" if step < 1 else f"{int(y)}"
                 ax_u.text(x_label, y, lbl, ha="left", va="center",
                          color=tick_grey, fontsize=8, alpha=0.9, zorder=2)
+
+        def _draw_xgrid_inside(ax_u, energy_grid, scale, xr):
+            """Draw vertical grid lines at decade boundaries."""
+            if energy_grid is None or len(energy_grid) < 2:
+                return
+
+            e_min, e_max = float(energy_grid.min()), float(energy_grid.max())
+
+            if scale == 'log':
+                log_e_min = np.log10(np.maximum(e_min, 1e-300))
+                log_e_max = np.log10(e_max)
+                log_span = log_e_max - log_e_min
+
+                if log_span <= 0:
+                    return
+
+                decade_min = int(np.floor(log_e_min))
+                decade_max = int(np.ceil(log_e_max))
+
+                axis_span = xr[1] - xr[0]
+
+                for decade in range(decade_min, decade_max + 1):
+                    e = 10**decade
+                    if e_min <= e <= e_max:
+                        frac = (np.log10(e) - log_e_min) / log_span
+                        pos = xr[0] + frac * axis_span
+                        ax_u.axvline(pos, color=tick_grey, lw=0.6, alpha=0.35, zorder=0)
+            else:
+                from matplotlib.ticker import MaxNLocator
+                locator = MaxNLocator(nbins=6, steps=[1, 2, 5, 10])
+                tick_energies = locator.tick_values(e_min, e_max)
+                tick_energies = tick_energies[(tick_energies >= e_min) & (tick_energies <= e_max)]
+
+                energy_span = e_max - e_min
+                if energy_span <= 0:
+                    return
+
+                axis_span = xr[1] - xr[0]
+                for e in tick_energies:
+                    frac = (e - e_min) / energy_span
+                    pos = xr[0] + frac * axis_span
+                    ax_u.axvline(pos, color=tick_grey, lw=0.6, alpha=0.35, zorder=0)
 
         # Find which groups are in the energy range
         def _find_groups_in_range(energy_grid: np.ndarray, elim: Tuple[float, float]) -> np.ndarray:
@@ -1930,6 +2166,7 @@ class HeatmapBuilder(PlotBuilder):
             ax_u.set_yticks([])
 
             _draw_ygrid_inside(ax_u, (xs_local[0], xs_local[-1]), ax_u.get_ylim()[1])
+            _draw_xgrid_inside(ax_u, cropped_energy_grid, scale, (xs_local[0], xs_local[-1]))
 
             if i == 0:
                 ax_u.set_ylabel('Unc. (%)', fontsize=10, color='black')
@@ -1946,8 +2183,8 @@ class HeatmapBuilder(PlotBuilder):
         full_xlim: Tuple[float, float],
         full_ylim: Tuple[float, float],
         *,
-        pad_frac_x: float = 0.000,
-        pad_frac_y: float = 0.012,
+        pad_frac_x: float = 0.020,
+        pad_frac_y: float = 0.020,
         fontsize: Optional[float] = None,
         x_axis_label: Optional[str] = None,
         y_axis_label: Optional[str] = None,

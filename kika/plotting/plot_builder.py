@@ -199,7 +199,6 @@ class PlotBuilder:
         self,
         data: Union[PlotData, Tuple[PlotData, Optional[Union[UncertaintyBand, PlotData]]]],
         uncertainty: Optional[Union[UncertaintyBand, PlotData]] = None,
-        sigma: Optional[float] = None,
         **styling_overrides
     ) -> 'PlotBuilder':
         """
@@ -210,18 +209,13 @@ class PlotBuilder:
         data : PlotData or tuple
             The data to plot. Can be either:
             - A PlotData object
-            - A tuple (PlotData, UncertaintyBand/PlotData) as returned by to_plot_data
-            If a tuple is provided and uncertainty is None, the uncertainty from the tuple will be used.
+            - A tuple (PlotData, UncertaintyBand) as returned by to_plot_data with uncertainty=True
+            If a tuple is provided and uncertainty is None, the UncertaintyBand from the tuple will be used.
         uncertainty : UncertaintyBand or PlotData, optional
             Uncertainty to plot with this data. Can be either:
             - UncertaintyBand object (will be plotted as shaded region)
             - PlotData object with uncertainty values (will be converted to band)
             If data is a tuple and this parameter is provided, this parameter takes precedence.
-        sigma : float, optional
-            Override the sigma level for uncertainty bands:
-            - None (default): use sigma from uncertainty data source
-            - 0: do not plot uncertainty band even if provided
-            - Any positive number: scale uncertainty by this sigma level
         **styling_overrides
             Styling overrides for this specific data (color, linestyle, etc.)
             
@@ -229,18 +223,6 @@ class PlotBuilder:
         -------
         PlotBuilder
             Self for method chaining
-            
-        Examples
-        --------
-        >>> # Basic usage with tuple from to_plot_data
-        >>> data, unc = endf.to_plot_data(mf=4, mt=2, order=1)
-        >>> builder.add_data(data, uncertainty=unc)
-        >>> 
-        >>> # Disable uncertainty plotting
-        >>> builder.add_data(data, uncertainty=unc, sigma=0)
-        >>> 
-        >>> # Plot with 2-sigma band
-        >>> builder.add_data(data, uncertainty=unc, sigma=2.0)
         """
         # Check for conflicts with heatmap data
         if self._heatmap_data is not None:
@@ -250,7 +232,7 @@ class PlotBuilder:
                 "Create separate PlotBuilder instances for heatmaps and line plots."
             )
         
-        # Handle tuple input from to_plot_data
+        # Handle tuple input from to_plot_data(uncertainty=True)
         if isinstance(data, tuple):
             if len(data) == 2:
                 plot_data, tuple_uncertainty = data
@@ -262,30 +244,12 @@ class PlotBuilder:
                 raise ValueError(f"Expected tuple of length 2, got {len(data)}")
         
         self._data_list.append(data)
-        # Remove 'sigma' from styling_overrides to avoid passing it to matplotlib
-        matplotlib_styling = {k: v for k, v in styling_overrides.items() if k != 'sigma'}
-        self._custom_styling.append(matplotlib_styling)
-        
-        # Handle sigma=0 case: skip uncertainty entirely
-        if sigma == 0:
-            uncertainty = None
+        self._custom_styling.append(styling_overrides)
         
         if uncertainty is not None:
             # Convert PlotData to UncertaintyBand if needed
             if isinstance(uncertainty, PlotData):
-                uncertainty = self._convert_plotdata_to_band(uncertainty, data, sigma_override=sigma)
-            elif sigma is not None and isinstance(uncertainty, UncertaintyBand):
-                # If sigma override provided for UncertaintyBand, create new band with updated sigma
-                if uncertainty.is_relative():
-                    uncertainty = UncertaintyBand(
-                        x=uncertainty.x,
-                        relative_uncertainty=uncertainty.relative_uncertainty,
-                        sigma=sigma,
-                        color=uncertainty.color,
-                        alpha=uncertainty.alpha,
-                        label=uncertainty.label
-                    )
-                # For absolute bounds, we'd need to rescale - skip for now
+                uncertainty = self._convert_plotdata_to_band(uncertainty, data)
             
             data_index = len(self._data_list) - 1
             self._uncertainty_bands.append((uncertainty, data_index))
@@ -1032,294 +996,6 @@ class PlotBuilder:
                     # Format label
                     if e == 0:
                         label = '0'
-        # Setup colormap
-        if isinstance(effective_cmap, str):
-            cmap = plt.get_cmap(effective_cmap).copy()
-        else:
-            cmap = effective_cmap
-        
-        if hasattr(cmap, 'set_bad'):
-            cmap.set_bad(color="#F0F0F0")
-        
-        # Handle normalization
-        if effective_norm is not None:
-            norm = effective_norm
-        elif effective_vmin is not None and effective_vmax is not None:
-            norm = plt.Normalize(vmin=effective_vmin, vmax=effective_vmax)
-        else:
-            # Auto-determine normalization
-            vmin = np.nanmin(M)
-            vmax = np.nanmax(M)
-            norm = plt.Normalize(vmin=vmin, vmax=vmax)
-        
-        # Draw heatmap (respect energy edges/extents when provided)
-        if getattr(heatmap_data, "x_edges", None) is not None and getattr(heatmap_data, "y_edges", None) is not None:
-            X, Y = np.meshgrid(heatmap_data.x_edges, heatmap_data.y_edges)
-            im = ax_heatmap.pcolormesh(X, Y, M, cmap=cmap, norm=norm, shading="flat")
-            
-            # Set default limits from data
-            default_xlim = (heatmap_data.x_edges[0], heatmap_data.x_edges[-1])
-            default_ylim = (heatmap_data.y_edges[0], heatmap_data.y_edges[-1])
-
-            x_limits = resolved_x_lim if resolved_x_lim is not None else default_xlim
-            y_limits = resolved_y_lim if resolved_y_lim is not None else default_ylim
-
-            ax_heatmap.set_xlim(x_limits)
-            ax_heatmap.set_ylim(y_limits)
-            ax_heatmap.invert_yaxis()
-        elif getattr(heatmap_data, "extent", None) is not None:
-            im = ax_heatmap.imshow(
-                M,
-                cmap=cmap,
-                norm=norm,
-                origin="upper",
-                interpolation="nearest",
-                aspect="auto",
-                extent=heatmap_data.extent,
-            )
-            
-            default_xlim = heatmap_data.extent[:2]
-            default_ylim = heatmap_data.extent[2:]
-            x_limits = resolved_x_lim if resolved_x_lim is not None else default_xlim
-            y_limits = resolved_y_lim if resolved_y_lim is not None else default_ylim
-
-            ax_heatmap.set_xlim(x_limits)
-            ax_heatmap.set_ylim(y_limits)
-        else:
-            im = ax_heatmap.imshow(M, cmap=cmap, norm=norm,
-                                  origin="upper", interpolation="nearest", aspect="auto")
-            
-            # Apply user-specified limits if provided
-            if resolved_x_lim is not None:
-                ax_heatmap.set_xlim(resolved_x_lim)
-            if resolved_y_lim is not None:
-                ax_heatmap.set_ylim(resolved_y_lim)
-            elif symmetric_matrix and resolved_x_lim is not None:
-                ax_heatmap.set_ylim(resolved_x_lim)
-        
-        # Handle block structure and ticks
-        if isinstance(heatmap_data, CovarianceHeatmapData):
-            self._setup_covariance_heatmap_ticks(ax_heatmap, heatmap_data)
-        elif isinstance(heatmap_data, MF34HeatmapData):
-            self._setup_mf34_heatmap_ticks(ax_heatmap, heatmap_data)
-
-        # Draw grid lines separating MT/L blocks when present
-        self._draw_block_boundaries(ax_heatmap, heatmap_data)
-        
-        # Set axis labels using builder configuration when available
-        default_axis_label = "MT number" if isinstance(heatmap_data, CovarianceHeatmapData) else "Legendre L"
-        x_label = getattr(self, "_x_label", None) or default_axis_label
-        y_label = getattr(self, "_y_label", None) or default_axis_label
-        if x_label:
-            if self._label_fontsize is not None:
-                ax_heatmap.set_xlabel(x_label, fontsize=self._label_fontsize)
-            else:
-                ax_heatmap.set_xlabel(x_label)
-        if y_label:
-            if self._label_fontsize is not None:
-                ax_heatmap.set_ylabel(y_label, fontsize=self._label_fontsize)
-            else:
-                ax_heatmap.set_ylabel(y_label)
-        
-        # Set title (suppress for paper/publication styles) preferring builder title
-        effective_title = getattr(self, "_title", None) or getattr(heatmap_data, "label", None)
-        if self.style not in ('paper', 'publication') and effective_title:
-            title_kwargs = {}
-            if self._title_fontsize is not None:
-                title_kwargs["fontsize"] = self._title_fontsize
-            # Higher y position to avoid overlap with rotated top axis labels
-            fig.suptitle(effective_title, y=1.02 if not has_uncertainties else 0.98, **title_kwargs)
-
-        if self._tick_labelsize is not None:
-            ax_heatmap.tick_params(axis='both', which='both', labelsize=self._tick_labelsize)
-        
-        # Draw uncertainty panels if requested
-        if has_uncertainties and uncertainty_axes is not None:
-            self._draw_uncertainty_panels(uncertainty_axes, heatmap_data, ax_heatmap)
-        
-        # Adjust layout to make room for colorbar
-        fig.canvas.draw()
-        heatmap_pos = ax_heatmap.get_position()
-        
-        # Calculate number of MTs/blocks for layout adjustment
-        if isinstance(heatmap_data, CovarianceHeatmapData) and heatmap_data.block_info:
-            num_blocks = len(heatmap_data.block_info.get('mts', [1]))
-        elif isinstance(heatmap_data, MF34HeatmapData) and heatmap_data.block_info:
-            num_blocks = len(heatmap_data.legendre_coeffs)
-        else:
-            num_blocks = 1
-        
-        # Bottom margin configuration (expand mildly with number of blocks)
-        extra_margin = max(0, num_blocks - 1) * 0.015
-        bottom_margin = min(0.12 + extra_margin, 0.26)
-        
-        if has_uncertainties:
-            fig.subplots_adjust(left=0.12, right=0.94, bottom=bottom_margin, top=0.90)
-        else:
-            fig.subplots_adjust(left=0.12, right=0.94, bottom=bottom_margin, top=0.93)
-        
-        # Add colorbar (offset increased to 0.10 to avoid overlap with right energy labels)
-        fig.canvas.draw()  # Draw to get accurate position
-        heatmap_pos = ax_heatmap.get_position()
-        cbar_ax = fig.add_axes([
-            heatmap_pos.x1 + 0.10,  # Right of heatmap + offset
-            heatmap_pos.y0,          # Aligned bottom
-            0.03,                    # Width
-            heatmap_pos.height       # Full height
-        ])
-        cbar = fig.colorbar(im, cax=cbar_ax)
-        if effective_colorbar_label:
-            cbar.set_label(effective_colorbar_label)
-        
-        # Configure figure interactivity
-        _configure_figure_interactivity(fig, self._interactive)
-        return fig
-    
-    def _setup_covariance_heatmap_ticks(self, ax: plt.Axes, data: 'CovarianceHeatmapData') -> None:
-        """Setup ticks for covariance heatmap using energy-based coordinates."""
-        import numpy as np
-
-        if not data.block_info or data.energy_grid is None:
-            return
-
-        tick_grey = "#707070"
-        mts = data.block_info.get('mts', [])
-        energy_ranges = data.block_info.get('energy_ranges', {}) or {}
-        ranges_fallback = data.block_info.get('ranges', []) or []
-        mt_labels = data.mt_labels or [str(m) for m in mts]
-
-        edges_raw = np.asarray(data.energy_grid, dtype=float)
-
-        def _fmt_sci_eV(v: float) -> str:
-            return f"{v:.0e}"
-
-        def _log_ticks_with_decades(edges_block: np.ndarray):
-            """Generate tick positions and labels for logarithmic energy scale.
-            Shows minor ticks (2-9 × 10^k) without labels, decade boundaries (10^k) with labels."""
-            Emin = float(edges_block[0])
-            Emax = float(edges_block[-1])
-            kmin = int(np.ceil(np.log10(max(Emin, 1e-300))))
-            kmax = int(np.floor(np.log10(max(Emax, 1e-300))))
-            ks = np.arange(kmin, kmax + 1, dtype=int) if kmax >= kmin else np.array([kmin])
-
-            vals = []
-            labels = []
-
-            # Add Emin if not a decade boundary (tick mark only, no label)
-            is_emin_decade = np.isclose(Emin, 10.0 ** np.round(np.log10(Emin)), rtol=1e-10)
-            is_emax_decade = np.isclose(Emax, 10.0 ** np.round(np.log10(Emax)), rtol=1e-10)
-            if not is_emin_decade:
-                vals.append(Emin)
-                labels.append("")  # No label for boundary values
-
-            # Add decade boundaries (10^k) with labels and intermediate ticks (2-9 × 10^k) without labels
-            for k in ks:
-                base = 10.0 ** k
-                for m in range(1, 10):  # m = 1, 2, 3, ..., 9
-                    v = m * base
-                    if Emin <= v <= Emax:
-                        vals.append(v)
-                        # Only label decade boundaries (m == 1)
-                        labels.append(_fmt_sci_eV(v) if m == 1 else "")
-
-            # Add Emax if not a decade boundary and not already added (tick mark only, no label)
-            if not is_emax_decade and (len(vals) == 0 or not np.isclose(vals[-1], Emax, rtol=1e-10)):
-                vals.append(Emax)
-                labels.append("")  # No label for boundary values
-
-            vals_arr = np.array(vals, dtype=float)
-            if vals_arr.size == 0:
-                return np.array([]), []
-
-            base0 = np.log10(max(Emin, 1e-300))
-            return np.log10(vals_arr) - base0, labels
-
-        def _linear_ticks_20pct(edges_block: np.ndarray):
-            Emin = float(edges_block[0])
-            Emax = float(edges_block[-1])
-            if Emax <= Emin:
-                return np.array([]), []
-            fracs = np.linspace(0.0, 1.0, 6)
-            vals = Emin + fracs * (Emax - Emin)
-            labels = [_fmt_sci_eV(v) for v in vals]
-            return vals - Emin, labels
-
-        def _energy_ticks(edges_block: np.ndarray):
-            if data.scale == "log" and edges_block[0] > 0:
-                return _log_ticks_with_decades(edges_block)
-            return _linear_ticks_20pct(edges_block)
-
-        # Build block coordinate ranges
-        x_ranges = []
-        if data.is_diagonal:
-            for i, m in enumerate(mts):
-                xr = energy_ranges.get(m)
-                if xr is None and len(ranges_fallback) > i:
-                    xr = ranges_fallback[i]
-                if xr is not None:
-                    x_ranges.append(tuple(xr))
-        else:
-            # off-diagonal: first mt is row, second is col
-            if len(mts) >= 2:
-                row_mt, col_mt = mts[0], mts[1]
-                y_range = energy_ranges.get(row_mt) or (ranges_fallback[0] if ranges_fallback else None)
-                x_range = energy_ranges.get(col_mt) or (ranges_fallback[1] if len(ranges_fallback) > 1 else None)
-                if x_range is not None:
-                    x_ranges.append(tuple(x_range))
-                if y_range is not None:
-                    y_range_val = tuple(y_range)
-                else:
-                    y_range_val = None
-            else:
-                x_range = ranges_fallback[0] if ranges_fallback else None
-                y_range_val = ranges_fallback[0] if ranges_fallback else None
-                if x_range is not None:
-                    x_ranges.append(tuple(x_range))
-
-        # MT labels on primary axes using block centers
-        if data.is_diagonal and x_ranges:
-            centers = [(a + b) * 0.5 for (a, b) in x_ranges]
-            ax.set_xticks(centers)
-            ax.set_xticklabels(mt_labels)
-            ax.set_yticks(centers)
-            ax.set_yticklabels(mt_labels)
-        elif not data.is_diagonal and len(mts) >= 2:
-            if x_ranges:
-                cx = (x_ranges[0][0] + x_ranges[0][1]) * 0.5
-                ax.set_xticks([cx])
-                ax.set_xticklabels([mt_labels[1] if len(mt_labels) > 1 else str(mts[1])])
-            if 'y_range_val' in locals() and y_range_val is not None:
-                cy = (y_range_val[0] + y_range_val[1]) * 0.5
-                ax.set_yticks([cy])
-                ax.set_yticklabels([mt_labels[0] if mt_labels else str(mts[0])])
-
-        if not data.show_energy_ticks or x_ranges == []:
-            return
-
-        pos_local, labels_all = _energy_ticks(edges_raw)
-
-        if data.is_diagonal and len(x_ranges) > 0:
-            top_ticks = []
-            top_labels = []
-            side_ticks = []
-            side_labels = []
-            for i, xr in enumerate(x_ranges):
-                pos_global = pos_local + xr[0]
-                filtered_top_labels = []
-                for lbl in labels_all:
-                    if lbl and (lbl == labels_all[0] or lbl == labels_all[-1]):
-                        filtered_top_labels.append("")
-                    else:
-                        filtered_top_labels.append(lbl)
-                top_ticks.extend(pos_global.tolist())
-                top_labels.extend(filtered_top_labels)
-
-                is_last_block = (i == len(x_ranges) - 1)
-                side_ticks.extend(pos_global.tolist())
-                filtered_side_labels = []
-                for lbl in labels_all:
-                    if lbl and lbl == labels_all[-1]:
-                        filtered_side_labels.append(lbl if is_last_block else "")
                     else:
                         exponent = int(np.floor(np.log10(abs(e))))
                         mantissa = e / (10**exponent)
@@ -1379,75 +1055,6 @@ class PlotBuilder:
             'log' or 'linear' scaling
         xlim : tuple, optional
             X-axis limits (start, end) in transformed local coordinates
-                        filtered_side_labels.append(lbl)
-                side_labels.extend(filtered_side_labels)
-        else:
-            x_range = x_ranges[0] if x_ranges else (0.0, 0.0)
-            pos_global = pos_local + x_range[0]
-            top_ticks = pos_global.tolist()
-            side_ticks = pos_global.tolist()
-            top_labels = []
-            for lbl in labels_all:
-                if lbl and (lbl == labels_all[0] or lbl == labels_all[-1]):
-                    top_labels.append("")
-                else:
-                    top_labels.append(lbl)
-            side_labels = labels_all
-
-        ax_top = ax.twiny()
-        ax_right = ax.twinx()
-        ax_bottom = ax.twiny()
-        ax_left = ax.twinx()
-
-        ax_top.set_xlim(ax.get_xlim())
-        ax_top.set_xticks(top_ticks)
-        ax_top.set_xticklabels(top_labels, fontsize=9, color=tick_grey, rotation=30, ha='left')
-        ax_top.tick_params(axis='x', direction='out', length=3, colors=tick_grey, pad=2, top=True, bottom=False)
-        ax_top.spines['top'].set_visible(True)
-        ax_top.spines['top'].set_linewidth(0.6)
-        ax_top.spines['top'].set_color(tick_grey)
-        ax_top.grid(False)
-
-        ax_bottom.set_xlim(ax.get_xlim())
-        ax_bottom.xaxis.set_ticks_position('bottom')
-        ax_bottom.spines['bottom'].set_position(('outward', 0))
-        ax_bottom.set_xticks(top_ticks)
-        ax_bottom.set_xticklabels([''] * len(top_ticks))
-        ax_bottom.tick_params(axis='x', direction='out', length=2, colors=tick_grey, pad=2, top=False, bottom=True)
-        ax_bottom.spines['bottom'].set_visible(False)
-        ax_bottom.grid(False)
-
-        # For the right/left Y-axis: use same tick positions as X (for symmetric matrix)
-        # The Y-axis is inverted (origin='upper'), so low energy at top, high energy at bottom
-        # This matches X-axis convention: low energy on left, high energy on right
-        ax_right.set_ylim(ax.get_ylim())
-        ax_right.set_yticks(side_ticks)
-        ax_right.set_yticklabels(side_labels, fontsize=9, color=tick_grey)
-        ax_right.tick_params(axis='y', direction='out', length=3, colors=tick_grey, pad=2, right=True, left=False)
-        ax_right.spines['right'].set_visible(True)
-        ax_right.spines['right'].set_linewidth(0.6)
-        ax_right.spines['right'].set_color(tick_grey)
-        ax_right.grid(False)
-
-        ax_left.set_ylim(ax.get_ylim())
-        ax_left.yaxis.set_ticks_position('left')
-        ax_left.spines['left'].set_position(('outward', 0))
-        ax_left.set_yticks(side_ticks)
-        ax_left.set_yticklabels([''] * len(side_ticks))
-        ax_left.tick_params(axis='y', direction='out', length=2, colors=tick_grey, pad=2, left=True, right=False)
-        ax_left.spines['left'].set_visible(False)
-        ax_left.grid(False)
-    
-    def _setup_mf34_heatmap_ticks(self, ax: plt.Axes, data: 'MF34HeatmapData') -> None:
-        """
-        Setup ticks for MF34 angular distribution heatmap.
-        
-        Implements complete 4-axis tick system with:
-        - Log-scale decade ticks with scientific notation (1e+05 format)
-        - Energy labels on TOP and RIGHT axes
-        - Tick marks only on BOTTOM and LEFT axes
-        - Special handling for inverted Y-axis (right labels reversed)
-        - Support for multiple Legendre coefficient blocks
         """
         import numpy as np
         from matplotlib.ticker import FuncFormatter, FixedLocator
@@ -1516,160 +1123,6 @@ class PlotBuilder:
                 mantissa = val / (10**exponent)
                 if abs(mantissa - 1.0) < 0.1:
                     return f'1e{exponent:+03d}'
-
-        block_info = data.block_info or {}
-        legendre_list = block_info.get('legendre_coeffs', data.legendre_coeffs)
-        energy_grids = data.energy_grids or {}
-        ranges_idx = block_info.get('ranges', {}) or {}
-        energy_ranges = block_info.get('energy_ranges', {}) or {}
-        edges_map = block_info.get('edges_transformed', {}) or {}
-        tick_grey = "#707070"
-
-        def _fmt_sci_eV(v: float) -> str:
-            return f"{v:.0e}"
-
-        def _log_ticks_with_decades(edges_block: np.ndarray):
-            """Generate tick positions and labels for logarithmic energy scale.
-            Shows minor ticks (2-9 × 10^k) without labels, decade boundaries (10^k) with labels."""
-            Emin = float(edges_block[0])
-            Emax = float(edges_block[-1])
-            kmin = int(np.ceil(np.log10(max(Emin, 1e-300))))
-            kmax = int(np.floor(np.log10(max(Emax, 1e-300))))
-            ks = np.arange(kmin, kmax + 1, dtype=int) if kmax >= kmin else np.array([kmin])
-
-            vals: list[float] = []
-            labels: list[str] = []
-
-            # Add Emin if not a decade boundary (tick mark only, no label)
-            is_emin_decade = np.isclose(Emin, 10.0 ** np.round(np.log10(Emin)), rtol=1e-10)
-            is_emax_decade = np.isclose(Emax, 10.0 ** np.round(np.log10(Emax)), rtol=1e-10)
-            if not is_emin_decade:
-                vals.append(Emin)
-                labels.append("")  # No label for boundary values
-
-            # Add decade boundaries (10^k) with labels and intermediate ticks (2-9 × 10^k) without labels
-            for k in ks:
-                base = 10.0 ** k
-                for m in range(1, 10):  # m = 1, 2, 3, ..., 9
-                    v = m * base
-                    if Emin <= v <= Emax:
-                        vals.append(v)
-                        # Only label decade boundaries (m == 1)
-                        labels.append(_fmt_sci_eV(v) if m == 1 else "")
-
-            # Add Emax if not a decade boundary and not already added (tick mark only, no label)
-            if not is_emax_decade and (len(vals) == 0 or not np.isclose(vals[-1], Emax, rtol=1e-10)):
-                vals.append(Emax)
-                labels.append("")  # No label for boundary values
-
-            vals_arr = np.array(vals, dtype=float)
-            if vals_arr.size == 0:
-                return np.array([]), []
-
-            base0 = np.log10(max(Emin, 1e-300))
-            return np.log10(vals_arr) - base0, labels
-
-        def _linear_ticks_20pct(edges_block: np.ndarray):
-            Emin = float(edges_block[0])
-            Emax = float(edges_block[-1])
-            if Emax <= Emin:
-                return np.array([]), []
-            fracs = np.linspace(0.0, 1.0, 6)
-            vals = Emin + fracs * (Emax - Emin)
-            labels = [_fmt_sci_eV(v) for v in vals]
-            return vals - Emin, labels
-
-        def _energy_ticks(edges_block: np.ndarray):
-            if data.scale == "log" and edges_block[0] > 0:
-                return _log_ticks_with_decades(edges_block)
-            return _linear_ticks_20pct(edges_block)
-
-        # Reconstruct transformed edges if they were not attached (fallback to concatenation order)
-        if not edges_map:
-            g_map = block_info.get("G_per_L", {})
-            if data.is_diagonal and getattr(data, "x_edges", None) is not None:
-                pointer = 0
-                for l_val in legendre_list:
-                    g_len = g_map.get(l_val)
-                    if g_len:
-                        edges_map[l_val] = np.asarray(data.x_edges[pointer:pointer + g_len + 1], dtype=float)
-                        pointer += g_len
-            elif not data.is_diagonal:
-                if getattr(data, "x_edges", None) is not None and len(legendre_list) >= 2:
-                    g_len = g_map.get(legendre_list[1])
-                    if g_len:
-                        edges_map[legendre_list[1]] = np.asarray(data.x_edges[:g_len + 1], dtype=float)
-                if getattr(data, "y_edges", None) is not None and len(legendre_list) >= 1:
-                    g_len = g_map.get(legendre_list[0])
-                    if g_len:
-                        edges_map[legendre_list[0]] = np.asarray(data.y_edges[:g_len + 1], dtype=float)
-
-        # Primary-axis Legendre ticks
-        if data.is_diagonal:
-            centers = []
-            labels = []
-            for l_val in legendre_list:
-                rng = energy_ranges.get(l_val) or ranges_idx.get(l_val)
-                if rng:
-                    centers.append((rng[0] + rng[1]) * 0.5)
-                    labels.append(str(l_val))
-            if centers:
-                ax.set_xticks(centers)
-                ax.set_xticklabels(labels)
-                ax.set_yticks(centers)
-                ax.set_yticklabels(labels)
-        elif len(legendre_list) == 2:
-            row_l, col_l = legendre_list
-            x_rng = energy_ranges.get(col_l) or ranges_idx.get(col_l)
-            y_rng = energy_ranges.get(row_l) or ranges_idx.get(row_l)
-            if x_rng:
-                ax.set_xticks([(x_rng[0] + x_rng[1]) * 0.5])
-                ax.set_xticklabels([str(col_l)])
-            if y_rng:
-                ax.set_yticks([(y_rng[0] + y_rng[1]) * 0.5])
-                ax.set_yticklabels([str(row_l)])
-
-        # Energy ticks might be disabled even if Legendre ticks are drawn
-        if not data.show_energy_ticks or not energy_grids:
-            return
-
-        blocks_for_x = []
-        blocks_for_y = []
-        if data.is_diagonal:
-            for l_val in legendre_list:
-                raw_edges = energy_grids.get(l_val)
-                transformed_edges = edges_map.get(l_val)
-                if raw_edges is None or transformed_edges is None:
-                    continue
-                blocks_for_x.append((l_val, np.asarray(raw_edges, dtype=float), transformed_edges[0]))
-            blocks_for_y = blocks_for_x
-        elif len(legendre_list) == 2:
-            row_l, col_l = legendre_list
-            raw_y = energy_grids.get(row_l)
-            raw_x = energy_grids.get(col_l)
-            trans_y = edges_map.get(row_l)
-            trans_x = edges_map.get(col_l)
-            if raw_x is not None and trans_x is not None:
-                blocks_for_x.append((col_l, np.asarray(raw_x, dtype=float), trans_x[0]))
-            if raw_y is not None and trans_y is not None:
-                blocks_for_y.append((row_l, np.asarray(raw_y, dtype=float), trans_y[0]))
-
-        if not blocks_for_x or not blocks_for_y:
-            return
-
-        top_ticks: list[float] = []
-        top_labels: list[str] = []
-        side_ticks: list[float] = []
-        side_labels: list[str] = []
-
-        for i, (l_val, raw_edges, offset) in enumerate(blocks_for_x):
-            pos_local, labels_all = _energy_ticks(raw_edges)
-            pos_global = pos_local + offset
-
-            filtered_top_labels = []
-            for lbl in labels_all:
-                if lbl and (lbl == labels_all[0] or lbl == labels_all[-1]):
-                    filtered_top_labels.append("")
                 else:
                     return f'{int(np.round(mantissa))}e{exponent:+03d}'
 
@@ -1683,64 +1136,6 @@ class PlotBuilder:
             ax.tick_params(axis='x', which='minor', length=2,
                           bottom=True, top=False, direction='in')
 
-                    filtered_top_labels.append(lbl)
-            top_ticks.extend(pos_global.tolist())
-            top_labels.extend(filtered_top_labels)
-
-            is_last_block = (i == len(blocks_for_x) - 1)
-            side_ticks.extend(pos_global.tolist())
-            filtered_side_labels = []
-            for lbl in labels_all:
-                if lbl and lbl == labels_all[-1]:
-                    filtered_side_labels.append(lbl if is_last_block else "")
-                else:
-                    filtered_side_labels.append(lbl)
-            side_labels.extend(filtered_side_labels)
-
-        ax_top = ax.twiny()
-        ax_right = ax.twinx()
-        ax_bottom = ax.twiny()
-        ax_left = ax.twinx()
-
-        ax_top.set_xlim(ax.get_xlim())
-        ax_top.set_xticks(top_ticks)
-        ax_top.set_xticklabels(top_labels, fontsize=9, color=tick_grey, rotation=30, ha='left')
-        ax_top.tick_params(axis='x', direction='out', length=3, colors=tick_grey, pad=2, top=True, bottom=False)
-        ax_top.spines['top'].set_visible(True)
-        ax_top.spines['top'].set_linewidth(0.6)
-        ax_top.spines['top'].set_color(tick_grey)
-        ax_top.grid(False)
-
-        ax_bottom.set_xlim(ax.get_xlim())
-        ax_bottom.xaxis.set_ticks_position('bottom')
-        ax_bottom.spines['bottom'].set_position(('outward', 0))
-        ax_bottom.set_xticks(top_ticks)
-        ax_bottom.set_xticklabels([''] * len(top_ticks))
-        ax_bottom.tick_params(axis='x', direction='out', length=2, colors=tick_grey, pad=2, top=False, bottom=True)
-        ax_bottom.spines['bottom'].set_visible(False)
-        ax_bottom.grid(False)
-
-        # For the right/left Y-axis: use same tick positions as X (for symmetric matrix)
-        # The Y-axis is inverted (origin='upper'), so low energy at top, high energy at bottom
-        # This matches X-axis convention: low energy on left, high energy on right
-        ax_right.set_ylim(ax.get_ylim())
-        ax_right.set_yticks(side_ticks)
-        ax_right.set_yticklabels(side_labels, fontsize=9, color=tick_grey)
-        ax_right.tick_params(axis='y', direction='out', length=3, colors=tick_grey, pad=2, right=True, left=False)
-        ax_right.spines['right'].set_visible(True)
-        ax_right.spines['right'].set_linewidth(0.6)
-        ax_right.spines['right'].set_color(tick_grey)
-        ax_right.grid(False)
-
-        ax_left.set_ylim(ax.get_ylim())
-        ax_left.yaxis.set_ticks_position('left')
-        ax_left.spines['left'].set_position(('outward', 0))
-        ax_left.set_yticks(side_ticks)
-        ax_left.set_yticklabels([''] * len(side_ticks))
-        ax_left.tick_params(axis='y', direction='out', length=2, colors=tick_grey, pad=2, left=True, right=False)
-        ax_left.spines['left'].set_visible(False)
-        ax_left.grid(False)
-    
     def _draw_block_boundaries(
         self,
         ax: plt.Axes,
@@ -2475,8 +1870,7 @@ class PlotBuilder:
     def _convert_plotdata_to_band(
         self,
         uncertainty_data: PlotData,
-        nominal_data: PlotData,
-        sigma_override: Optional[float] = None
+        nominal_data: PlotData
     ) -> UncertaintyBand:
         """
         Convert uncertainty PlotData to UncertaintyBand.
@@ -2487,20 +1881,12 @@ class PlotBuilder:
             PlotData containing uncertainty values (MultigroupUncertaintyPlotData or LegendreUncertaintyPlotData)
         nominal_data : PlotData
             The nominal data that these uncertainties correspond to
-        sigma_override : float, optional
-            Override sigma value. If None, uses sigma from uncertainty_data if available, else 1.0.
             
         Returns
         -------
         UncertaintyBand
             Converted uncertainty band object
         """
-        # Determine sigma: use override if provided, else get from data, else default to 1.0
-        if sigma_override is not None:
-            sigma = sigma_override
-        else:
-            sigma = getattr(uncertainty_data, 'sigma', 1.0)
-        
         # Check if this is a recognized uncertainty PlotData type
         if isinstance(uncertainty_data, (MultigroupUncertaintyPlotData, LegendreUncertaintyPlotData)):
             # These PlotData types now store uncertainties at bin edges (n+1 points)
@@ -2509,9 +1895,7 @@ class PlotBuilder:
             uncertainty_type = getattr(uncertainty_data, 'uncertainty_type', 'relative')
             
             if uncertainty_type == 'relative':
-                # y values are in percentage (already scaled by sigma in to_plot_data)
-                # Convert to fractional for UncertaintyBand
-                # Since sigma was already applied in to_plot_data, we use sigma=1.0 in the band
+                # y values are in percentage - convert to fractional (0.05 for 5%)
                 rel_unc = np.array(uncertainty_data.y) / 100.0
                 unc_x = np.array(uncertainty_data.x)
                 nom_x = np.array(nominal_data.x)

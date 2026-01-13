@@ -30,7 +30,6 @@ def plot_covariance_heatmap(
     show_uncertainties: bool = True,
     scale: str = "log",
     energy_range: Optional[Tuple[float, float]] = None,
-    title: Optional[str] = "default",
 ) -> plt.Figure:
     """
     Draw a covariance or correlation matrix heatmap for one isotope and one or more MT reactions,
@@ -69,9 +68,6 @@ def plot_covariance_heatmap(
         Energy axis scale: "log"/"logarithmic" or "lin"/"linear'
     energy_range : tuple of float, optional
         Energy range (min, max) for filtering. Values in eV.
-    title : str or None, default "default"
-        Plot title. If "default", generates automatic title from nuclide/MT.
-        If a string, uses that as the title. If None, no title is displayed.
 
     Returns
     -------
@@ -155,33 +151,10 @@ def plot_covariance_heatmap(
     # Create the plot using HeatmapBuilder (always use light style for heatmaps)
     builder = HeatmapBuilder(style="light", figsize=figsize, dpi=dpi, font_family=font_family)
     fig = builder.add_heatmap(
-        heatmap_data.vmin = vmin
-        heatmap_data.vmax = vmax
-    
-    # Handle title parameter
-    if title == "default":
-        # Keep the default title from heatmap_data.label
-        pass
-    elif title is None:
-        # Suppress title
-        heatmap_data.label = None
-    else:
-        # Use custom title
-        heatmap_data.label = title
-    
-    # Create the plot using PlotBuilder (always use light style for heatmaps)
-    builder = PlotBuilder(style="light", figsize=figsize, dpi=dpi, font_family=font_family)
-    builder.add_heatmap(
         heatmap_data,
         show_uncertainties=show_uncertainties,
     ).build()
     # If uncertainties panels are shown, the HeatmapBuilder places the suptitle
-    )
-    
-    # Build the figure
-    fig = builder.build()
-    
-    # If uncertainties panels are shown, the PlotBuilder places the suptitle
     # a bit high; nudge it down slightly for better layout.
     if show_uncertainties and fig is not None:
         # Determine effective title used by builder/heatmap_data
@@ -212,7 +185,6 @@ def plot_mf34_covariance_heatmap(
     cmap: Optional[str] = None,
     scale: str = "log",
     energy_range: Optional[Tuple[float, float]] = None,
-    title: Optional[str] = "default",
 ) -> plt.Figure:
     """
     Draw a covariance/correlation heatmap for MF34 angular distribution data
@@ -255,9 +227,6 @@ def plot_mf34_covariance_heatmap(
         Energy axis scale: "log"/"logarithmic" or "lin"/"linear"
     energy_range : tuple of float, optional
         Energy range (min, max) for filtering. Values in eV.
-    title : str or None, default "default"
-        Plot title. If "default", generates automatic title from nuclide/MT/Legendre.
-        If a string, uses that as the title. If None, no title is displayed.
 
     Returns
     -------
@@ -350,34 +319,11 @@ def plot_mf34_covariance_heatmap(
     # Create the plot using HeatmapBuilder (always use light style for heatmaps)
     builder = HeatmapBuilder(style="light", figsize=figsize, dpi=dpi, font_family=font_family)
     fig = builder.add_heatmap(
-        heatmap_data.vmin = vmin
-        heatmap_data.vmax = vmax
-    
-    # Handle title parameter
-    if title == "default":
-        # Keep the default title from heatmap_data.label
-        pass
-    elif title is None:
-        # Suppress title
-        heatmap_data.label = None
-    else:
-        # Use custom title
-        heatmap_data.label = title
-    
-    # Create the plot using PlotBuilder (always use light style for heatmaps)
-    builder = PlotBuilder(style="light", figsize=figsize, dpi=dpi, font_family=font_family)
-    builder.add_heatmap(
         heatmap_data,
         show_uncertainties=show_uncertainties,
     ).build()
 
     # If uncertainties panels are shown, the HeatmapBuilder places the suptitle
-    )
-    
-    # Build the figure
-    fig = builder.build()
-    
-    # If uncertainties panels are shown, the PlotBuilder places the suptitle
     # a bit high; nudge it down slightly for better layout.
     if show_uncertainties and fig is not None:
         # Determine effective title used by builder/heatmap_data
