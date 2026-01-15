@@ -162,11 +162,12 @@ class HeatmapBuilder(PlotBuilder):
         """
         from .plot_data import CovarianceHeatmapData, MF34HeatmapData
 
-        # Get the matrix data
-        if hasattr(heatmap_data, 'get_masked_data'):
-            M = heatmap_data.get_masked_data()
-        else:
-            M = heatmap_data.matrix_data
+        # Get mask_value for reapplying after cropping
+        mask_value = getattr(heatmap_data, 'mask_value', None)
+
+        # Get the matrix data - use raw matrix_data for cropping to avoid
+        # masked array issues with off-diagonal blocks
+        M = heatmap_data.matrix_data
 
         lo, hi = energy_lim
         if lo > hi:
@@ -248,6 +249,7 @@ class HeatmapBuilder(PlotBuilder):
                     'mts': mts,
                     'G': G_new,
                     'energy_ranges': new_energy_ranges,
+                    'cropped_energy_grids': {mt: cropped_energy_grid for mt in mts},
                 }
             else:
                 # Single-block: simple crop
@@ -260,9 +262,19 @@ class HeatmapBuilder(PlotBuilder):
                     new_x_edges = cropped_energy_grid - cropped_energy_grid[0]
 
                 new_y_edges = new_x_edges.copy()
-                new_block_info = block_info.copy() if block_info else {}
-                if new_block_info:
-                    new_block_info['G'] = G_new
+
+                # Build proper block_info for single-block with updated energy_ranges
+                width = new_x_edges[-1] if len(new_x_edges) > 1 else 1.0
+                new_block_info = {
+                    'mts': mts if mts else list(uncertainty_data.keys()) if uncertainty_data else [],
+                    'G': G_new,
+                    'energy_ranges': {},
+                    'cropped_energy_grids': {},
+                }
+                # Set energy_ranges for each MT key
+                for mt_key in new_block_info['mts']:
+                    new_block_info['energy_ranges'][mt_key] = (0.0, width)
+                    new_block_info['cropped_energy_grids'][mt_key] = cropped_energy_grid
 
             # Crop uncertainty data
             cropped_uncertainty = None
@@ -273,6 +285,10 @@ class HeatmapBuilder(PlotBuilder):
                         cropped_uncertainty[key] = sigma[groups_idx]
                     else:
                         cropped_uncertainty[key] = sigma
+
+            # Reapply mask to cropped matrix
+            if mask_value is not None:
+                cropped_M = np.ma.masked_where(cropped_M == mask_value, cropped_M)
 
             return cropped_M, new_x_edges, new_y_edges, new_block_info, cropped_energy_grid, cropped_uncertainty
 
@@ -307,6 +323,8 @@ class HeatmapBuilder(PlotBuilder):
                 new_energy_ranges = {}
                 new_G_per_L = {}
                 new_x_edges_parts = []
+                new_cropped_energy_grids = {}  # Store per-block cropped energy grids
+                new_groups_idx_per_L = {}  # Store per-block group indices
                 current_pos = 0.0
 
                 for l_val in legendre_list:
@@ -324,6 +342,8 @@ class HeatmapBuilder(PlotBuilder):
                     new_G_per_L[l_val] = G_l_new
 
                     cropped_grid = energy_grid[start_g_L:end_g_L + 1]
+                    new_cropped_energy_grids[l_val] = cropped_grid  # Store cropped grid
+                    new_groups_idx_per_L[l_val] = groups_idx_L  # Store group indices
 
                     if idx_range is not None:
                         start_idx, end_idx = idx_range
@@ -357,11 +377,47 @@ class HeatmapBuilder(PlotBuilder):
 
                 total_size = sum(b.shape[0] for b in cropped_blocks_diag)
                 cropped_M = np.zeros((total_size, total_size))
-                pos = 0
-                for block in cropped_blocks_diag:
-                    size = block.shape[0]
-                    cropped_M[pos:pos+size, pos:pos+size] = block
-                    pos += size
+
+                # Calculate cumulative positions for placing blocks
+                cumulative_positions = {}
+                current_block_pos = 0
+                valid_l_vals = [l for l in legendre_list if l in new_G_per_L]
+                for l_val in valid_l_vals:
+                    cumulative_positions[l_val] = current_block_pos
+                    current_block_pos += new_G_per_L[l_val]
+
+                # Place ALL blocks (diagonal and off-diagonal)
+                for i, l_row in enumerate(valid_l_vals):
+                    for j, l_col in enumerate(valid_l_vals):
+                        row_groups_idx = new_groups_idx_per_L.get(l_row)
+                        col_groups_idx = new_groups_idx_per_L.get(l_col)
+
+                        if row_groups_idx is None or col_groups_idx is None:
+                            continue
+
+                        row_range = ranges_dict.get(l_row)
+                        col_range = ranges_dict.get(l_col)
+
+                        if row_range is None or col_range is None:
+                            continue
+
+                        # Calculate source indices in original matrix
+                        row_start_orig = row_range[0] if isinstance(row_range, tuple) else 0
+                        col_start_orig = col_range[0] if isinstance(col_range, tuple) else 0
+
+                        row_indices_orig = row_start_orig + row_groups_idx
+                        col_indices_orig = col_start_orig + col_groups_idx
+
+                        # Extract the sub-block from original matrix
+                        sub_block = M[np.ix_(row_indices_orig, col_indices_orig)]
+
+                        # Calculate target position in cropped matrix
+                        row_pos = cumulative_positions[l_row]
+                        col_pos = cumulative_positions[l_col]
+
+                        # Place the block
+                        cropped_M[row_pos:row_pos+len(row_groups_idx),
+                                  col_pos:col_pos+len(col_groups_idx)] = sub_block
 
                 new_x_edges = np.concatenate(new_x_edges_parts) if new_x_edges_parts else heatmap_data.x_edges
                 new_y_edges = new_x_edges.copy()
@@ -371,9 +427,64 @@ class HeatmapBuilder(PlotBuilder):
                     'ranges': new_ranges,
                     'energy_ranges': new_energy_ranges,
                     'G_per_L': new_G_per_L,
+                    'cropped_energy_grids': new_cropped_energy_grids,
+                    'groups_idx_per_L': new_groups_idx_per_L,
                 }
+
+                # Reapply mask to cropped matrix (multi-block diagonal)
+                if mask_value is not None:
+                    cropped_M = np.ma.masked_where(cropped_M == mask_value, cropped_M)
+            elif not heatmap_data.is_diagonal:
+                # Off-diagonal block: L1 vs L2 with potentially different energy grids
+                # Extract row and column Legendre coefficients
+                row_l = legendre_list[0]
+                col_l = legendre_list[1]
+                
+                # Get energy grids for each L
+                row_energy_grid = energy_grids.get(row_l)
+                col_energy_grid = energy_grids.get(col_l)
+                
+                if row_energy_grid is None or col_energy_grid is None:
+                    return M, heatmap_data.x_edges, heatmap_data.y_edges, block_info, None, uncertainty_data
+                
+                # Find groups in range separately for rows and columns
+                row_groups_idx, row_start_g, row_end_g = _find_groups_in_range(row_energy_grid)
+                col_groups_idx, col_start_g, col_end_g = _find_groups_in_range(col_energy_grid)
+                
+                if len(row_groups_idx) == 0 or len(col_groups_idx) == 0:
+                    return M, heatmap_data.x_edges, heatmap_data.y_edges, block_info, None, uncertainty_data
+                
+                # Crop matrix using separate row and column indices (rectangular)
+                cropped_M = M[np.ix_(row_groups_idx, col_groups_idx)]
+                
+                # Build separate edges for rows (y-axis) and columns (x-axis)
+                cropped_row_grid = row_energy_grid[row_start_g:row_end_g + 1]
+                cropped_col_grid = col_energy_grid[col_start_g:col_end_g + 1]
+                
+                if scale == 'log':
+                    new_y_edges = np.log10(np.maximum(cropped_row_grid, 1e-300))
+                    new_y_edges = new_y_edges - new_y_edges[0]
+                    new_x_edges = np.log10(np.maximum(cropped_col_grid, 1e-300))
+                    new_x_edges = new_x_edges - new_x_edges[0]
+                else:
+                    new_y_edges = cropped_row_grid - cropped_row_grid[0]
+                    new_x_edges = cropped_col_grid - cropped_col_grid[0]
+                
+                # Build block_info for off-diagonal with separate dimensions
+                y_width = new_y_edges[-1] if len(new_y_edges) > 1 else 1.0
+                x_width = new_x_edges[-1] if len(new_x_edges) > 1 else 1.0
+                
+                new_block_info = {
+                    'legendre_coeffs': [row_l, col_l],
+                    'cropped_energy_grids': {row_l: cropped_row_grid, col_l: cropped_col_grid},
+                    'groups_idx_per_L': {row_l: row_groups_idx, col_l: col_groups_idx},
+                    'energy_ranges': {row_l: (0.0, y_width), col_l: (0.0, x_width)},
+                }
+                
+                # Use first available energy grid for return value (convention)
+                cropped_energy_grid = cropped_row_grid
             else:
-                # Single-block or non-diagonal MF34
+                # Single-block diagonal MF34
                 cropped_M = M[np.ix_(groups_idx, groups_idx)]
 
                 if scale == 'log':
@@ -383,17 +494,48 @@ class HeatmapBuilder(PlotBuilder):
                     new_x_edges = cropped_energy_grid - cropped_energy_grid[0]
 
                 new_y_edges = new_x_edges.copy()
-                new_block_info = block_info.copy() if block_info else {}
+                width = new_x_edges[-1] if len(new_x_edges) > 1 else 1.0
+
+                # Build proper block_info for single-block with updated energy_ranges
+                new_block_info = {}
+                if legendre_list and len(legendre_list) > 0:
+                    l_key = legendre_list[0]
+                    new_block_info = {
+                        'legendre_coeffs': [l_key],
+                        'cropped_energy_grids': {l_key: cropped_energy_grid},
+                        'groups_idx_per_L': {l_key: groups_idx},
+                        'energy_ranges': {l_key: (0.0, width)},
+                    }
 
             # Crop uncertainty data
             cropped_uncertainty = None
             if uncertainty_data:
                 cropped_uncertainty = {}
-                for key, sigma in uncertainty_data.items():
-                    if len(groups_idx) <= len(sigma):
-                        cropped_uncertainty[key] = sigma[groups_idx]
-                    else:
-                        cropped_uncertainty[key] = sigma
+                if is_multi_block and heatmap_data.is_diagonal:
+                    # For multi-block, use per-block group indices
+                    groups_idx_per_L = new_block_info.get('groups_idx_per_L', {})
+                    for key, sigma in uncertainty_data.items():
+                        key_groups_idx = groups_idx_per_L.get(key)
+                        if key_groups_idx is not None and len(key_groups_idx) > 0 and len(key_groups_idx) <= len(sigma):
+                            cropped_uncertainty[key] = sigma[key_groups_idx]
+                        else:
+                            cropped_uncertainty[key] = sigma
+                else:
+                    # For single-block MF34 or CovarianceHeatmapData, use per-key or common group indices
+                    groups_idx_per_L = new_block_info.get('groups_idx_per_L', {})
+                    for key, sigma in uncertainty_data.items():
+                        # Try to get per-key group indices first (for MF34)
+                        key_groups_idx = groups_idx_per_L.get(key) if groups_idx_per_L else None
+                        if key_groups_idx is not None and len(key_groups_idx) > 0 and len(key_groups_idx) <= len(sigma):
+                            cropped_uncertainty[key] = sigma[key_groups_idx]
+                        elif len(groups_idx) <= len(sigma):
+                            cropped_uncertainty[key] = sigma[groups_idx]
+                        else:
+                            cropped_uncertainty[key] = sigma
+
+            # Reapply mask to cropped matrix (MF34 single-block or after multi-block diagonal)
+            if mask_value is not None:
+                cropped_M = np.ma.masked_where(cropped_M == mask_value, cropped_M)
 
             return cropped_M, new_x_edges, new_y_edges, new_block_info, cropped_energy_grid, cropped_uncertainty
 
@@ -838,6 +980,15 @@ class HeatmapBuilder(PlotBuilder):
 
         if has_uncertainties:
             num_panels = len(heatmap_data.uncertainty_data)
+
+            # For off-diagonal MF34 heatmaps, use single panel for all uncertainties
+            is_off_diagonal = (
+                hasattr(heatmap_data, 'is_diagonal') and
+                not heatmap_data.is_diagonal
+            )
+            if is_off_diagonal:
+                num_panels = 1
+
             fig.set_size_inches(figsize[0], figsize[1] * 1.2)
 
             gs = GridSpec(2, num_panels if num_panels > 1 else 1, figure=fig,
@@ -1018,7 +1169,8 @@ class HeatmapBuilder(PlotBuilder):
                 cropped_xlim = (cropped_x_edges[0], cropped_x_edges[-1]) if cropped_x_edges is not None else None
                 self._draw_uncertainty_panels_cropped(
                     uncertainty_axes, heatmap_data, cropped_block_info,
-                    cropped_energy_grid, energy_lim, cropped_xlim
+                    cropped_energy_grid, energy_lim, cropped_xlim,
+                    cropped_uncertainty_data=cropped_uncertainty_data
                 )
             else:
                 # No limits when not cropped
@@ -1046,12 +1198,16 @@ class HeatmapBuilder(PlotBuilder):
             fig.canvas.draw()  # Ensure layout is updated
             self._add_block_labels_figure_fixed(
                 fig, ax_heatmap,
-                pending_block_labels['centers'],
-                pending_block_labels['labels'],
-                pending_block_labels['full_xlim'],
-                pending_block_labels['full_ylim'],
+                pending_block_labels.get('centers'),
+                pending_block_labels.get('labels'),
+                pending_block_labels.get('full_xlim', (0, 1)),
+                pending_block_labels.get('full_ylim', (0, 1)),
                 x_axis_label=pending_block_labels.get('x_axis_label'),
-                y_axis_label=pending_block_labels.get('y_axis_label')
+                y_axis_label=pending_block_labels.get('y_axis_label'),
+                x_centers=pending_block_labels.get('x_centers'),
+                x_labels=pending_block_labels.get('x_labels'),
+                y_centers=pending_block_labels.get('y_centers'),
+                y_labels=pending_block_labels.get('y_labels'),
             )
 
         # Add colorbar if enabled
@@ -1196,18 +1352,29 @@ class HeatmapBuilder(PlotBuilder):
                 ax.set_xticks([])
                 ax.set_yticks([])
 
-                # For non-diagonal, return x labels (the primary case)
+                # For off-diagonal, use separate x and y labels
+                x_centers = []
+                x_labels_list = []
+                y_centers = []
+                y_labels_list = []
+
                 if x_rng:
                     x_centers = [(x_rng[0] + x_rng[1]) * 0.5]
-                    x_labels = [str(col_l)]
-                    pending_block_labels = {
-                        'centers': x_centers,
-                        'labels': x_labels,
-                        'full_xlim': full_xlim,
-                        'full_ylim': full_ylim,
-                        'x_axis_label': "Legendre Order",
-                        'y_axis_label': "Legendre Order"
-                    }
+                    x_labels_list = [str(col_l)]
+                if y_rng:
+                    y_centers = [(y_rng[0] + y_rng[1]) * 0.5]
+                    y_labels_list = [str(row_l)]
+
+                pending_block_labels = {
+                    'x_centers': x_centers,
+                    'x_labels': x_labels_list,
+                    'y_centers': y_centers,
+                    'y_labels': y_labels_list,
+                    'full_xlim': full_xlim,
+                    'full_ylim': full_ylim,
+                    'x_axis_label': "Legendre Order",
+                    'y_axis_label': "Legendre Order"
+                }
         else:
             ax.set_xticks([])
             ax.set_yticks([])
@@ -1682,32 +1849,71 @@ class HeatmapBuilder(PlotBuilder):
 
         pending_block_labels = None
 
+        # Check if this is an off-diagonal MF34 case (2 different L values)
+        is_off_diagonal = (
+            not isinstance(original_data, CovarianceHeatmapData) and
+            not getattr(original_data, 'is_diagonal', True) and
+            len(block_keys) == 2
+        )
+
         # Setup block labels
         if self._heatmap_show_block_labels and energy_ranges:
-            centers = []
-            labels = []
-            for key in block_keys:
-                rng = energy_ranges.get(key)
-                if rng:
-                    centers.append((rng[0] + rng[1]) * 0.5)
-                    if isinstance(original_data, CovarianceHeatmapData):
-                        labels.append(str(key))
-                    else:
-                        labels.append(str(key))
+            x_axis_label = "MT Number" if isinstance(original_data, CovarianceHeatmapData) else "Legendre Order"
 
-            if centers:
+            if is_off_diagonal:
+                # Off-diagonal: separate x and y labels
+                row_l = block_keys[0]
+                col_l = block_keys[1]
+
+                x_centers = []
+                x_labels_list = []
+                y_centers = []
+                y_labels_list = []
+
+                x_rng = energy_ranges.get(col_l)
+                y_rng = energy_ranges.get(row_l)
+
+                if x_rng:
+                    x_centers = [(x_rng[0] + x_rng[1]) * 0.5]
+                    x_labels_list = [str(col_l)]
+                if y_rng:
+                    y_centers = [(y_rng[0] + y_rng[1]) * 0.5]
+                    y_labels_list = [str(row_l)]
+
                 ax.set_xticks([])
                 ax.set_yticks([])
-                x_axis_label = "MT Number" if isinstance(original_data, CovarianceHeatmapData) else "Legendre Order"
-                # Return pending labels instead of drawing now
                 pending_block_labels = {
-                    'centers': centers,
-                    'labels': labels,
+                    'x_centers': x_centers,
+                    'x_labels': x_labels_list,
+                    'y_centers': y_centers,
+                    'y_labels': y_labels_list,
                     'full_xlim': full_xlim,
                     'full_ylim': full_ylim,
                     'x_axis_label': x_axis_label,
                     'y_axis_label': x_axis_label
                 }
+            else:
+                # Diagonal or multiblock: same labels on both axes
+                centers = []
+                labels = []
+                for key in block_keys:
+                    rng = energy_ranges.get(key)
+                    if rng:
+                        centers.append((rng[0] + rng[1]) * 0.5)
+                        labels.append(str(key))
+
+                if centers:
+                    ax.set_xticks([])
+                    ax.set_yticks([])
+                    # Return pending labels instead of drawing now
+                    pending_block_labels = {
+                        'centers': centers,
+                        'labels': labels,
+                        'full_xlim': full_xlim,
+                        'full_ylim': full_ylim,
+                        'x_axis_label': x_axis_label,
+                        'y_axis_label': x_axis_label
+                    }
         else:
             ax.set_xticks([])
             ax.set_yticks([])
@@ -1767,7 +1973,7 @@ class HeatmapBuilder(PlotBuilder):
                          color=tick_grey, fontsize=8, alpha=0.9, zorder=2)
 
         def _draw_xgrid_inside(ax_u, energy_grid, scale, xr):
-            """Draw vertical grid lines at decade boundaries."""
+            """Draw vertical grid lines at decade and sub-decade boundaries."""
             if energy_grid is None or len(energy_grid) < 2:
                 return
 
@@ -1787,13 +1993,22 @@ class HeatmapBuilder(PlotBuilder):
                 # Calculate axis span (transformed coordinates)
                 axis_span = xr[1] - xr[0]
 
+                # Draw major decade lines (1e5, 1e6, etc.) - darker
                 for decade in range(decade_min, decade_max + 1):
                     e = 10**decade
                     if e_min <= e <= e_max:
-                        # Map to transformed coordinate
                         frac = (np.log10(e) - log_e_min) / log_span
                         pos = xr[0] + frac * axis_span
                         ax_u.axvline(pos, color=tick_grey, lw=0.6, alpha=0.35, zorder=0)
+
+                # Draw sub-decade lines (2e5, 3e5, 5e5, etc.) - lighter
+                for decade in range(decade_min, decade_max + 1):
+                    for mult in [2, 3, 4, 5, 6, 7, 8, 9]:
+                        e = mult * 10**decade
+                        if e_min <= e <= e_max:
+                            frac = (np.log10(e) - log_e_min) / log_span
+                            pos = xr[0] + frac * axis_span
+                            ax_u.axvline(pos, color=tick_grey, lw=0.4, alpha=0.2, zorder=0)
             else:
                 # Linear scale: use nice tick values
                 from matplotlib.ticker import MaxNLocator
@@ -1864,12 +2079,8 @@ class HeatmapBuilder(PlotBuilder):
                         ax_u.set_xlim(0.0, xs_local[-1])
 
                     raw_grid = heatmap_data.energy_grids.get(L) if heatmap_data.energy_grids else None
-                    if raw_grid is not None:
-                        current_xlim = ax_u.get_xlim()
-                        self._add_uncertainty_energy_ticks(ax_u, raw_grid, heatmap_data.scale,
-                                                         xlim=current_xlim)
-                    else:
-                        ax_u.set_xticks([])
+                    # Remove ticks - grid lines are drawn by _draw_xgrid_inside below
+                    ax_u.set_xticks([])
                     ax_u.set_yticks([])
 
                     _draw_ygrid_inside(ax_u, (0.0, xs_local[-1]), ax_u.get_ylim()[1])
@@ -1882,47 +2093,63 @@ class HeatmapBuilder(PlotBuilder):
                     for side in ('left', 'right', 'top', 'bottom'):
                         ax_u.spines[side].set_visible(False)
             else:
+                # Off-diagonal case: plot both L values on single panel with legend
                 ax_u = uncertainty_axes[0]
-                L = keys[0]
-                sigma_pct = uncertainty_data[L]
-                xs_edges = _edges_for_L(L)
-                if xs_edges is None or xs_edges.size == 0:
-                    return
-
                 ax_u.set_facecolor(background_color)
                 ax_u.grid(False)
 
-                xs_local = xs_edges - xs_edges[0]
-                sigma_ext = np.append(sigma_pct, sigma_pct[-1]) if sigma_pct.size > 0 else sigma_pct
+                y_max_global = 1.0
+                x_max_global = 0.0
+                legend_handles = []
+                legend_labels = []
+                colors = ['C0', 'C1', 'C2', 'C3']
 
-                if sigma_ext.size > 0 and np.any(sigma_ext > 0):
-                    ax_u.step(xs_local, sigma_ext, where='post',
-                              linewidth=1.4, color='C0', zorder=3)
-                    y_max = float(np.nanmax(sigma_ext))
-                else:
-                    y_max = 5.0
+                for i, L in enumerate(keys):
+                    if L not in uncertainty_data:
+                        continue
+                    sigma_pct = uncertainty_data[L]
+                    xs_edges = _edges_for_L(L)
+                    if xs_edges is None or xs_edges.size == 0:
+                        continue
 
-                y_max = max(y_max, 1.0)
-                top, _ = _nice_ylim_and_step(y_max * 1.05)
+                    xs_local = xs_edges - xs_edges[0]
+                    sigma_ext = np.append(sigma_pct, sigma_pct[-1]) if sigma_pct.size > 0 else sigma_pct
+
+                    color = colors[i % len(colors)]
+                    if sigma_ext.size > 0 and np.any(sigma_ext > 0):
+                        line, = ax_u.step(xs_local, sigma_ext, where='post',
+                                  linewidth=1.4, color=color, zorder=3, label=f'L={L}')
+                        legend_handles.append(line)
+                        legend_labels.append(f'L={L}')
+                        y_max_global = max(y_max_global, float(np.nanmax(sigma_ext)))
+
+                    if len(xs_local) > 0:
+                        x_max_global = max(x_max_global, xs_local[-1])
+
+                # Set y limits based on all curves
+                top, _ = _nice_ylim_and_step(y_max_global * 1.05)
                 ax_u.set_ylim(0.0, top)
 
                 if x_limits is not None:
                     ax_u.set_xlim(x_limits)
-                else:
-                    ax_u.set_xlim(0.0, xs_local[-1])
+                elif x_max_global > 0:
+                    ax_u.set_xlim(0.0, x_max_global)
 
-                raw_grid = heatmap_data.energy_grids.get(L) if heatmap_data.energy_grids else None
-                if raw_grid is not None:
-                    current_xlim = ax_u.get_xlim()
-                    self._add_uncertainty_energy_ticks(ax_u, raw_grid, heatmap_data.scale,
-                                                     xlim=current_xlim)
-                else:
-                    ax_u.set_xticks([])
+                # Add legend if we have multiple curves
+                if len(legend_handles) > 1:
+                    ax_u.legend(legend_handles, legend_labels, loc='upper right',
+                               fontsize=8, framealpha=0.7)
+
+                # Use first L's grid for grid lines
+                L_first = keys[0]
+                raw_grid = heatmap_data.energy_grids.get(L_first) if heatmap_data.energy_grids else None
+                ax_u.set_xticks([])
                 ax_u.set_yticks([])
 
-                _draw_ygrid_inside(ax_u, (0.0, xs_local[-1]), ax_u.get_ylim()[1])
-                if raw_grid is not None:
-                    _draw_xgrid_inside(ax_u, raw_grid, heatmap_data.scale, (0.0, xs_local[-1]))
+                if x_max_global > 0:
+                    _draw_ygrid_inside(ax_u, (0.0, x_max_global), ax_u.get_ylim()[1])
+                    if raw_grid is not None:
+                        _draw_xgrid_inside(ax_u, raw_grid, heatmap_data.scale, (0.0, x_max_global))
 
                 ax_u.set_ylabel('Unc. (%)', fontsize=10)
 
@@ -1972,12 +2199,8 @@ class HeatmapBuilder(PlotBuilder):
                 else:
                     ax_unc.set_xlim(xs_plot[0], xs_plot[-1])
 
-                if energy_grid is not None:
-                    current_xlim = ax_unc.get_xlim()
-                    self._add_uncertainty_energy_ticks(ax_unc, energy_grid, heatmap_data.scale,
-                                                     xlim=current_xlim)
-                else:
-                    ax_unc.set_xticks([])
+                # Remove ticks - grid lines are drawn by _draw_xgrid_inside below
+                ax_unc.set_xticks([])
                 ax_unc.set_yticks([])
 
                 if xs_edges.size >= 2:
@@ -1998,12 +2221,17 @@ class HeatmapBuilder(PlotBuilder):
         cropped_block_info: Dict[str, Any],
         cropped_energy_grid: Optional[np.ndarray],
         energy_lim: Optional[Tuple[float, float]],
-        x_limits: Optional[Tuple[float, float]] = None
+        x_limits: Optional[Tuple[float, float]] = None,
+        cropped_uncertainty_data: Optional[Dict] = None
     ) -> None:
         """Draw uncertainty panels for cropped multi-block heatmaps."""
         from .plot_data import CovarianceHeatmapData, MF34HeatmapData
 
-        uncertainty_data = heatmap_data.uncertainty_data
+        # Use cropped uncertainty data if provided, otherwise fall back to original
+        if cropped_uncertainty_data is not None:
+            uncertainty_data = cropped_uncertainty_data
+        else:
+            uncertainty_data = heatmap_data.uncertainty_data
         if not uncertainty_data or cropped_energy_grid is None:
             return
 
@@ -2033,7 +2261,7 @@ class HeatmapBuilder(PlotBuilder):
                          color=tick_grey, fontsize=8, alpha=0.9, zorder=2)
 
         def _draw_xgrid_inside(ax_u, energy_grid, scale, xr):
-            """Draw vertical grid lines at decade boundaries."""
+            """Draw vertical grid lines at decade and sub-decade boundaries."""
             if energy_grid is None or len(energy_grid) < 2:
                 return
 
@@ -2052,12 +2280,22 @@ class HeatmapBuilder(PlotBuilder):
 
                 axis_span = xr[1] - xr[0]
 
+                # Draw major decade lines (1e5, 1e6, etc.) - darker
                 for decade in range(decade_min, decade_max + 1):
                     e = 10**decade
                     if e_min <= e <= e_max:
                         frac = (np.log10(e) - log_e_min) / log_span
                         pos = xr[0] + frac * axis_span
                         ax_u.axvline(pos, color=tick_grey, lw=0.6, alpha=0.35, zorder=0)
+
+                # Draw sub-decade lines (2e5, 3e5, 5e5, etc.) - lighter
+                for decade in range(decade_min, decade_max + 1):
+                    for mult in [2, 3, 4, 5, 6, 7, 8, 9]:
+                        e = mult * 10**decade
+                        if e_min <= e <= e_max:
+                            frac = (np.log10(e) - log_e_min) / log_span
+                            pos = xr[0] + frac * axis_span
+                            ax_u.axvline(pos, color=tick_grey, lw=0.4, alpha=0.2, zorder=0)
             else:
                 from matplotlib.ticker import MaxNLocator
                 locator = MaxNLocator(nbins=6, steps=[1, 2, 5, 10])
@@ -2088,108 +2326,215 @@ class HeatmapBuilder(PlotBuilder):
                     in_range.append(i)
             return np.array(in_range, dtype=int)
 
-        # Get original energy grid
-        original_energy_grid = heatmap_data.energy_grid
-        if original_energy_grid is None:
-            return
-
-        # Find which groups we kept
-        groups_idx = _find_groups_in_range(original_energy_grid, energy_lim) if energy_lim else np.arange(len(original_energy_grid) - 1)
-
-        # Calculate transformed edges for cropped data
-        scale = getattr(heatmap_data, 'scale', 'log')
-        if scale == 'log':
-            cropped_edges = np.log10(np.maximum(cropped_energy_grid, 1e-300))
-            cropped_edges = cropped_edges - cropped_edges[0]
-        else:
-            cropped_edges = cropped_energy_grid - cropped_energy_grid[0]
-
-        # Get block keys
+        # Get block keys and check if we have per-block energy grids
         if isinstance(heatmap_data, CovarianceHeatmapData):
             block_keys = cropped_block_info.get('mts', [])
         else:
             block_keys = cropped_block_info.get('legendre_coeffs', [])
 
+        # Check if we have per-block cropped energy grids (multi-block MF34)
+        cropped_energy_grids_per_block = cropped_block_info.get('cropped_energy_grids', {})
+        has_per_block_grids = len(cropped_energy_grids_per_block) > 0
+
+        scale = getattr(heatmap_data, 'scale', 'log')
         energy_ranges = cropped_block_info.get('energy_ranges', {})
 
-        # Draw one uncertainty panel per block
-        for i, (ax_u, key) in enumerate(zip(uncertainty_axes, block_keys)):
-            # Get original uncertainty data for this block
-            sigma_pct_full = uncertainty_data.get(key)
-            if sigma_pct_full is None:
-                continue
+        # Check if this is off-diagonal (single panel for multiple L values)
+        is_off_diagonal = (
+            hasattr(heatmap_data, 'is_diagonal') and
+            not heatmap_data.is_diagonal and
+            len(block_keys) >= 2
+        )
 
-            # Crop to the groups that are in range
-            if len(groups_idx) > 0 and len(groups_idx) < len(sigma_pct_full):
-                sigma_pct = sigma_pct_full[groups_idx]
-            else:
-                sigma_pct = sigma_pct_full
-
+        if is_off_diagonal:
+            # Off-diagonal case: plot all curves on single panel with legend
+            ax_u = uncertainty_axes[0]
             ax_u.set_facecolor(background_color)
             ax_u.grid(False)
 
-            # Get block range in coordinate space
-            block_range = energy_ranges.get(key, (0, cropped_edges[-1]))
-            block_width = block_range[1] - block_range[0]
+            y_max_global = 1.0
+            x_min_global = float('inf')
+            x_max_global = 0.0
+            legend_handles = []
+            legend_labels = []
+            colors = ['C0', 'C1', 'C2', 'C3']
+            first_grid = None
 
-            # Scale edges to fit in block coordinate range
-            if cropped_edges[-1] > 0:
-                xs_local = cropped_edges * (block_width / cropped_edges[-1]) + block_range[0]
-            else:
-                xs_local = cropped_edges + block_range[0]
+            for i, key in enumerate(block_keys):
+                sigma_pct = uncertainty_data.get(key)
+                if sigma_pct is None:
+                    continue
 
-            # Extend sigma for step plot
-            if sigma_pct.size > 0:
-                sigma_ext = np.append(sigma_pct, sigma_pct[-1])
-            else:
-                sigma_ext = sigma_pct
+                # Get block-specific energy grid
+                if has_per_block_grids:
+                    block_energy_grid = cropped_energy_grids_per_block.get(key, cropped_energy_grid)
+                else:
+                    block_energy_grid = cropped_energy_grid
 
-            if sigma_ext.size > 0 and np.any(sigma_ext > 0):
-                ax_u.step(xs_local, sigma_ext, where='post',
-                          linewidth=1.4, color=f"C{i}", zorder=3)
-                y_max = float(np.nanmax(sigma_ext))
-            else:
-                y_max = 5.0
+                if first_grid is None:
+                    first_grid = block_energy_grid
 
-            y_max = max(y_max, 1.0)
-            top, _ = _nice_ylim_and_step(y_max * 1.05)
+                # Calculate transformed edges
+                if scale == 'log':
+                    block_edges = np.log10(np.maximum(block_energy_grid, 1e-300))
+                    block_edges = block_edges - block_edges[0]
+                else:
+                    block_edges = block_energy_grid - block_energy_grid[0]
+
+                xs_local = block_edges
+
+                # Extend sigma for step plot
+                if sigma_pct.size > 0:
+                    sigma_ext = np.append(sigma_pct, sigma_pct[-1])
+                else:
+                    sigma_ext = sigma_pct
+
+                color = colors[i % len(colors)]
+                if sigma_ext.size > 0 and np.any(sigma_ext > 0):
+                    line, = ax_u.step(xs_local, sigma_ext, where='post',
+                              linewidth=1.4, color=color, zorder=3, label=f'L={key}')
+                    legend_handles.append(line)
+                    legend_labels.append(f'L={key}')
+                    y_max_global = max(y_max_global, float(np.nanmax(sigma_ext)))
+
+                if len(xs_local) > 0:
+                    x_min_global = min(x_min_global, xs_local[0])
+                    x_max_global = max(x_max_global, xs_local[-1])
+
+            # Set limits based on all curves
+            top, _ = _nice_ylim_and_step(y_max_global * 1.05)
             ax_u.set_ylim(0.0, top)
 
-            if x_limits is not None:
-                ax_u.set_xlim(x_limits)
-            else:
-                ax_u.set_xlim(xs_local[0], xs_local[-1])
+            if x_max_global > x_min_global:
+                ax_u.set_xlim(x_min_global, x_max_global)
 
-            # Add energy ticks
-            current_xlim = ax_u.get_xlim()
-            self._add_uncertainty_energy_ticks(ax_u, cropped_energy_grid, scale, xlim=current_xlim)
+            # Add legend
+            if len(legend_handles) > 1:
+                ax_u.legend(legend_handles, legend_labels, loc='upper right',
+                           fontsize=8, framealpha=0.7)
+
+            ax_u.set_xticks([])
             ax_u.set_yticks([])
 
-            _draw_ygrid_inside(ax_u, (xs_local[0], xs_local[-1]), ax_u.get_ylim()[1])
-            _draw_xgrid_inside(ax_u, cropped_energy_grid, scale, (xs_local[0], xs_local[-1]))
+            if x_max_global > x_min_global:
+                _draw_ygrid_inside(ax_u, (x_min_global, x_max_global), ax_u.get_ylim()[1])
+                if first_grid is not None:
+                    _draw_xgrid_inside(ax_u, first_grid, scale, (x_min_global, x_max_global))
 
-            if i == 0:
-                ax_u.set_ylabel('Unc. (%)', fontsize=10, color='black')
+            ax_u.set_ylabel('Unc. (%)', fontsize=10, color='black')
 
             for side in ('left', 'right', 'top', 'bottom'):
                 ax_u.spines[side].set_visible(False)
+        else:
+            # Draw one uncertainty panel per block (diagonal or multi-block diagonal)
+            for i, (ax_u, key) in enumerate(zip(uncertainty_axes, block_keys)):
+                # Get uncertainty data for this block (already cropped)
+                sigma_pct = uncertainty_data.get(key)
+                if sigma_pct is None:
+                    continue
+
+                ax_u.set_facecolor(background_color)
+                ax_u.grid(False)
+
+                # Get block-specific energy grid if available, otherwise use common grid
+                if has_per_block_grids:
+                    block_energy_grid = cropped_energy_grids_per_block.get(key, cropped_energy_grid)
+                else:
+                    block_energy_grid = cropped_energy_grid
+
+                # Calculate transformed edges for this block
+                if scale == 'log':
+                    block_edges = np.log10(np.maximum(block_energy_grid, 1e-300))
+                    block_edges = block_edges - block_edges[0]
+                else:
+                    block_edges = block_energy_grid - block_energy_grid[0]
+
+                # Get block range in coordinate space
+                if has_per_block_grids:
+                    block_range = energy_ranges.get(key, (0, block_edges[-1] if len(block_edges) > 0 else 1.0))
+                else:
+                    block_edges_ref = np.log10(np.maximum(cropped_energy_grid, 1e-300)) if scale == 'log' else cropped_energy_grid
+                    block_edges_ref = block_edges_ref - block_edges_ref[0]
+                    block_range = energy_ranges.get(key, (0, block_edges_ref[-1] if len(block_edges_ref) > 0 else 1.0))
+                block_width = block_range[1] - block_range[0]
+
+                # Scale edges to fit in block coordinate range
+                if len(block_edges) > 0 and block_edges[-1] > 0:
+                    xs_local = block_edges * (block_width / block_edges[-1]) + block_range[0]
+                else:
+                    xs_local = block_edges + block_range[0] if len(block_edges) > 0 else np.array([block_range[0]])
+
+                # Extend sigma for step plot
+                if sigma_pct.size > 0:
+                    sigma_ext = np.append(sigma_pct, sigma_pct[-1])
+                else:
+                    sigma_ext = sigma_pct
+
+                if sigma_ext.size > 0 and np.any(sigma_ext > 0):
+                    ax_u.step(xs_local, sigma_ext, where='post',
+                              linewidth=1.4, color=f"C{i}", zorder=3)
+                    y_max = float(np.nanmax(sigma_ext))
+                else:
+                    y_max = 5.0
+
+                y_max = max(y_max, 1.0)
+                top, _ = _nice_ylim_and_step(y_max * 1.05)
+                ax_u.set_ylim(0.0, top)
+
+                # For multi-block, each panel shows one block, so use the block's range
+                # Don't use x_limits which spans all blocks
+                is_multi_block = len(block_keys) > 1
+                if x_limits is not None and not is_multi_block:
+                    ax_u.set_xlim(x_limits)
+                else:
+                    ax_u.set_xlim(xs_local[0], xs_local[-1])
+
+                # Remove ticks - grid lines are drawn by _draw_xgrid_inside below
+                ax_u.set_xticks([])
+                ax_u.set_yticks([])
+
+                if len(xs_local) > 0:
+                    _draw_ygrid_inside(ax_u, (xs_local[0], xs_local[-1]), ax_u.get_ylim()[1])
+                    _draw_xgrid_inside(ax_u, block_energy_grid, scale, (xs_local[0], xs_local[-1]))
+
+                if i == 0:
+                    ax_u.set_ylabel('Unc. (%)', fontsize=10, color='black')
+
+                for side in ('left', 'right', 'top', 'bottom'):
+                    ax_u.spines[side].set_visible(False)
 
     def _add_block_labels_figure_fixed(
         self,
         fig: plt.Figure,
         ax: plt.Axes,
-        centers: List[float],
-        labels: List[str],
-        full_xlim: Tuple[float, float],
-        full_ylim: Tuple[float, float],
+        centers: Optional[List[float]] = None,
+        labels: Optional[List[str]] = None,
+        full_xlim: Tuple[float, float] = (0, 1),
+        full_ylim: Tuple[float, float] = (0, 1),
         *,
         pad_frac_x: float = 0.020,
         pad_frac_y: float = 0.020,
         fontsize: Optional[float] = None,
         x_axis_label: Optional[str] = None,
         y_axis_label: Optional[str] = None,
+        x_centers: Optional[List[float]] = None,
+        x_labels: Optional[List[str]] = None,
+        y_centers: Optional[List[float]] = None,
+        y_labels: Optional[List[str]] = None,
     ) -> None:
-        """Place block labels relative to the figure (not axis ticks)."""
+        """Place block labels relative to the figure (not axis ticks).
+
+        For off-diagonal blocks, use x_centers/x_labels for bottom (x-axis)
+        and y_centers/y_labels for left (y-axis) to show different labels.
+        For backward compatibility, centers/labels are used for both axes
+        when x/y-specific parameters are not provided.
+        """
+        # Use explicit x/y if provided, else fall back to shared centers/labels
+        actual_x_centers = x_centers if x_centers is not None else centers
+        actual_x_labels = x_labels if x_labels is not None else labels
+        actual_y_centers = y_centers if y_centers is not None else centers
+        actual_y_labels = y_labels if y_labels is not None else labels
+
         ax_pos = ax.get_position()
 
         x0, x1 = float(full_xlim[0]), float(full_xlim[1])
@@ -2202,21 +2547,23 @@ class HeatmapBuilder(PlotBuilder):
         outer_label_fs = fs
 
         # Bottom labels (x direction)
-        y_text = ax_pos.y0 - pad_frac_x
-        for c, lab in zip(centers, labels):
-            frac = (float(c) - x0) / dx
-            frac = min(1.0, max(0.0, frac))
-            x_text = ax_pos.x0 + frac * ax_pos.width
-            fig.text(x_text, y_text, lab, ha="center", va="top", fontsize=fs)
+        if actual_x_centers and actual_x_labels:
+            y_text = ax_pos.y0 - pad_frac_x
+            for c, lab in zip(actual_x_centers, actual_x_labels):
+                frac = (float(c) - x0) / dx
+                frac = min(1.0, max(0.0, frac))
+                x_text = ax_pos.x0 + frac * ax_pos.width
+                fig.text(x_text, y_text, lab, ha="center", va="top", fontsize=fs)
 
         # Left labels (y direction) - inverted for heatmap
-        x_text = ax_pos.x0 - pad_frac_y
-        for c, lab in zip(centers, labels):
-            frac = (float(c) - y0) / dy
-            frac = min(1.0, max(0.0, frac))
-            frac = 1.0 - frac  # Invert for y-axis
-            y_text = ax_pos.y0 + frac * ax_pos.height
-            fig.text(x_text, y_text, lab, ha="right", va="center", fontsize=fs)
+        if actual_y_centers and actual_y_labels:
+            x_text = ax_pos.x0 - pad_frac_y
+            for c, lab in zip(actual_y_centers, actual_y_labels):
+                frac = (float(c) - y0) / dy
+                frac = min(1.0, max(0.0, frac))
+                frac = 1.0 - frac  # Invert for y-axis
+                y_text = ax_pos.y0 + frac * ax_pos.height
+                fig.text(x_text, y_text, lab, ha="right", va="center", fontsize=fs)
 
         # Outer axis labels
         outer_offset = 0.025

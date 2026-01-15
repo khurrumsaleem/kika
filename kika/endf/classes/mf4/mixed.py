@@ -41,7 +41,7 @@ class MF4MTMixed(MF4MT):
     def legendre_energies(self) -> List[float]:
         """Energy grid for Legendre coefficients"""
         return self._energies
-    
+
     @property
     def tabulated_energies(self) -> List[float]:
         """Energy grid for tabulated angular distributions"""

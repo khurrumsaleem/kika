@@ -276,7 +276,20 @@ def load_exfor_data(json_file: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         'units': obj.get('units', {}),
         'angle_frame': obj.get('angle_frame', 'Unknown')
     }
-    
+
+    # Extract energy resolution inputs from method section (for TOF experiments)
+    method = obj.get('method', {})
+    energy_res_inputs = method.get('energy_resolution_inputs', {})
+    if energy_res_inputs:
+        distance_info = energy_res_inputs.get('distance', {})
+        time_res_info = energy_res_inputs.get('time_resolution', {})
+        meta['energy_resolution_inputs'] = {
+            'flight_path_m': distance_info.get('value'),
+            'time_resolution_ns': time_res_info.get('value'),
+        }
+    else:
+        meta['energy_resolution_inputs'] = None
+
     # Parse data from all energies
     data_rows = []
     for energy_block in obj.get('energies', []):

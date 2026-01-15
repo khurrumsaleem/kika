@@ -43,7 +43,12 @@ class MF4MTLegendre(MF4MT):
     def legendre_energies(self) -> List[float]:
         """Energy grid for Legendre coefficients (alias for energies for compatibility)"""
         return self._energies
-    
+
+    @property
+    def energies(self) -> List[float]:
+        """Energy grid (alias for legendre_energies for API consistency with MF4MTTabulated)"""
+        return self._energies
+
     @property
     def legendre_coefficients(self) -> List[List[float]]:
         """
