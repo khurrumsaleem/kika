@@ -802,7 +802,7 @@ def read_tabulated_distribution(ace: Ace, base_idx: int, mt_entry: XssEntry,
     Read a tabulated angular distribution.
     
     Each distribution consists of:
-    1. Interpolation flag (1=histogram, 2=linear-linear)
+    1. Interpolation flag (0=histogram, 1=linear-linear per ACE Table 20)
     2. Number of points (Np)
     3. Cosine grid (Np values)
     4. PDF values (Np values)
@@ -848,7 +848,7 @@ def read_tabulated_distribution(ace: Ace, base_idx: int, mt_entry: XssEntry,
         if locc_value == 0:
             # Isotropic distribution at this energy
             # Add a simple two-point distribution: μ=[-1,1], PDF=[0.5,0.5], CDF=[0,1]
-            distribution.interpolation.append(2)  # linear-linear
+            distribution.interpolation.append(1)  # linear-linear (JJ=1 per ACE Table 20)
             
             # Create XssEntry objects for the simple distribution
             cosines = [XssEntry(0, -1.0), XssEntry(0, 1.0)]
@@ -888,7 +888,7 @@ def read_tabulated_distribution(ace: Ace, base_idx: int, mt_entry: XssEntry,
         num_points = int(ace.xss_data[data_loc + 1].value)
         
         if debug and i < 3:  # Show first 3 energy points only
-            interp_type = "histogram" if interp_flag == 1 else "linear-linear" if interp_flag == 2 else f"unknown ({interp_flag})"
+            interp_type = "histogram" if interp_flag == 0 else "linear-linear" if interp_flag == 1 else f"unknown ({interp_flag})"
             logger.debug(f"  Interpolation: {interp_flag} ({interp_type}), Number of points: {num_points}")
         
         # Validate num_points

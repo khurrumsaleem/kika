@@ -4,38 +4,56 @@ EXFOR (Experimental Nuclear Reaction Data) utilities for KIKA.
 This module provides classes and functions for loading, processing, and plotting
 experimental angular distribution data from EXFOR.
 
+Quick Start:
+    >>> import kika.exfor as exfor
+    >>>
+    >>> # Configure database path once at the start
+    >>> exfor.configure(db_path="C:/Data/x4sqlite1.db")
+    >>>
+    >>> # Now load data without specifying path each time
+    >>> data = exfor.read_all_exfor(target="Fe56", mt=2)
+    >>> print(f"Found {len(data)} energy groups")
+
 Primary API:
+    - configure(): Set default database path for the session
+    - read_all_exfor(): Load EXFOR data from database or JSON files
     - read_exfor(): Load a single EXFOR JSON file
-    - read_all_exfor(): Load all EXFOR files from a directory
-    - ExforEntry: Base class for EXFOR entries
     - ExforAngularDistribution: Main class for angular distribution data
 
-Example:
-    >>> from kika.exfor import read_exfor
-    >>> exfor = read_exfor('/path/to/27673002.json')
-    >>> print(exfor.label)
+Example - Loading from Database:
+    >>> import kika.exfor as exfor
+    >>> exfor.configure(db_path="/path/to/x4sqlite1.db")
+    >>>
+    >>> # Load Fe-56 elastic scattering data
+    >>> data = exfor.read_all_exfor(target="Fe56", mt=2)
+    >>>
+    >>> # Load with energy filter
+    >>> data = exfor.read_all_exfor(target="U235", mt=18, energy_range=(1.0, 5.0))
+
+Example - Loading from JSON:
+    >>> exfor_data = exfor.read_exfor('/path/to/27673002.json')
+    >>> print(exfor_data.label)
     Gkatis et al. (2025)
-    >>> print(exfor.energies())  # Returns numpy array of energies in MeV
-    [1.0098, 1.0202, ...]
-
-    # Convert to CM frame
-    >>> exfor_cm = exfor.convert_to_cm()
-
-    # Get data at specific energy
-    >>> df = exfor_cm.to_dataframe(energy=1.5)
-
-    # Get data in energy range with forward angles only
-    >>> df = exfor_cm.to_dataframe(energy=(1.0, 2.0), angle=(0, 90))
 
 Legacy API:
     The functions from AD_utils are still available but deprecated.
     Please migrate to the new class-based API.
 """
 
+# Configuration (call configure() to set defaults for the session)
+from kika.exfor.config import configure, get_config
+
 # Primary API - Main exports
 from kika.exfor.io import read_exfor, read_all_exfor
 from kika.exfor.exfor_entry import ExforEntry
 from kika.exfor.angular_distribution import ExforAngularDistribution
+
+# Database API
+from kika.exfor.database import (
+    X4ProDatabase,
+    X4ProDataset,
+    read_exfor_from_database,
+)
 
 # Transform functions
 from kika.exfor.transforms import (
@@ -76,11 +94,18 @@ from kika.exfor.AD_utils import (
 )
 
 __all__ = [
+    # Configuration
+    "configure",
+    "get_config",
     # Primary API
     "read_exfor",
     "read_all_exfor",
     "ExforEntry",
     "ExforAngularDistribution",
+    # Database API
+    "X4ProDatabase",
+    "X4ProDataset",
+    "read_exfor_from_database",
     # Transforms
     "cos_cm_from_cos_lab",
     "cos_lab_from_cos_cm",

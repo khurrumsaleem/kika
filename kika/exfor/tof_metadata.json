@@ -1,0 +1,45 @@
+{
+  "_description": "TOF parameters for EXFOR experiments. Used to supplement database which lacks this metadata.",
+  "_note": "Experiments not listed here will use default values (flight_path_m=27.037, time_resolution_ns=10.0)",
+  "default": {
+    "flight_path_m": 27.037,
+    "time_resolution_ns": 10.0
+  },
+  "experiments": {
+    "10037024": {
+      "flight_path_m": 2.75,
+      "time_resolution_ns": 1.5,
+      "notes": "Boschung (1971) - Case Western VDG, 3 MeV"
+    },
+    "10571002": {
+      "flight_path_m": 40.0,
+      "time_resolution_ns": 8.0,
+      "notes": "Kinney (1976) - ORELA LINAC"
+    },
+    "14462002": {
+      "flight_path_m": 4.0,
+      "time_resolution_ns": 1.0,
+      "notes": "Ramirez (2017) - University of Kentucky VDG"
+    },
+    "20743002": {
+      "flight_path_m": 57.0,
+      "time_resolution_ns": 5.47,
+      "notes": "Cierjacks (1978) - KFK Isochronous Cyclotron"
+    },
+    "23365004": {
+      "flight_path_m": 27.037,
+      "time_resolution_ns": 5.0,
+      "notes": "Pirovano (2019) - GELINA LINAC"
+    },
+    "23365005": {
+      "flight_path_m": 8.3,
+      "time_resolution_ns": 1.0,
+      "notes": "Pirovano (2019) - nELBE LINAC"
+    },
+    "27673002": {
+      "flight_path_m": 27.037,
+      "time_resolution_ns": 10.0,
+      "notes": "Gkatis (2025) - GELINA LINAC"
+    }
+  }
+}

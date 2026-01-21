@@ -18,7 +18,7 @@ from kika.plotting.plot_builder import PlotBuilder
 
 def plot_covariance_heatmap(
     covmat: CovMat,
-    nuclide: Union[int, str],
+    nuclide: Union[int, str, List[Union[int, str]]],
     mt: Union[int, Sequence[int], Tuple[int, int]],
     *,
     matrix_type: str = "corr",
@@ -32,8 +32,8 @@ def plot_covariance_heatmap(
     energy_range: Optional[Tuple[float, float]] = None,
 ) -> plt.Figure:
     """
-    Draw a covariance or correlation matrix heatmap for one isotope and one or more MT reactions,
-    with optional uncertainty plots shown above the heatmap columns.
+    Draw a covariance or correlation matrix heatmap for one or more isotopes and
+    one or more MT reactions, with optional uncertainty plots shown above the heatmap columns.
 
     This function uses the modern PlotBuilder infrastructure for cleaner, more
     maintainable code while maintaining the same API as the original implementation.
@@ -42,15 +42,17 @@ def plot_covariance_heatmap(
     ----------
     covmat : CovMat
         The covariance matrix object
-    nuclide : int or str
-        Isotope identifier. Can be either:
+    nuclide : int, str, or list of int/str
+        Isotope identifier(s). Can be:
         - Integer ZAID (e.g., 92235 for U-235)
         - Element-mass string (e.g., 'U235', 'Fe56')
+        - List of ZAIDs or strings for multi-isotope heatmaps (e.g., ['Fe54', 'Fe56'])
     mt : int, sequence of int, or tuple of (row_mt, col_mt)
         MT reaction number(s). Can be:
         - Single int: diagonal block for that MT
-        - Sequence of ints: diagonal blocks for those MTs  
+        - Sequence of ints: diagonal blocks for those MTs
         - Tuple of (row_mt, col_mt): off-diagonal block between row and column MT
+          (not supported for multi-isotope heatmaps)
     matrix_type : str, default "corr"
         Type of matrix to plot: "corr"/"correlation" for correlation matrix,
         or "cov"/"covariance" for covariance matrix
@@ -82,35 +84,33 @@ def plot_covariance_heatmap(
     Examples
     --------
     Plot a single MT diagonal block:
-    
+
     >>> fig = plot_covariance_heatmap(covmat, nuclide=92235, mt=2)
     >>> plt.savefig("u235_elastic.png")
 
     Plot with nuclide string:
-    
+
     >>> fig = plot_covariance_heatmap(covmat, nuclide='U235', mt=[2, 18, 102])
 
     Plot covariance matrix instead of correlation:
-    
+
     >>> fig = plot_covariance_heatmap(covmat, nuclide='Fe56', mt=2, matrix_type='cov')
 
     Plot an off-diagonal block between two MTs:
-    
+
     >>> fig = plot_covariance_heatmap(covmat, nuclide=92235, mt=(2, 18))
+
+    Plot multi-isotope heatmap showing cross-isotope correlations:
+
+    >>> fig = plot_covariance_heatmap(covmat, nuclide=['Fe54', 'Fe56'], mt=[2, 18])
 
     See Also
     --------
     plot_covariance_difference_heatmap : Plot differences between two covariance matrices
     plot_mf34_covariance_heatmap : Plot MF34 angular distribution covariances
     """
-    # Convert nuclide to ZAID if string
-    from kika._utils import symbol_to_zaid
-    
-    if isinstance(nuclide, str):
-        zaid = symbol_to_zaid(nuclide)
-    else:
-        zaid = nuclide
-    
+    # Note: nuclide conversion and multi-isotope handling is done in to_heatmap_data()
+
     # Normalize matrix_type
     matrix_type_normalized = matrix_type.lower()
     if matrix_type_normalized in ("corr", "correlation"):

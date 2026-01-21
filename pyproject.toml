@@ -26,6 +26,7 @@ pandas = "^2.2.3"
 xarray = "^2025.3.0"
 scipy = "^1.15.2"
 pyarrow = "^20.0.0"
+httpx = "^0.28.0"
 
 [tool.poetry.group.dev]
 optional = true

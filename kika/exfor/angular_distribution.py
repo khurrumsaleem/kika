@@ -21,10 +21,13 @@ from kika.exfor._constants import (
     NEUTRON_MASS_AMU,
     ENERGY_TO_MEV,
     XS_TO_B_SR,
+    PLOTTING_ENERGY_TOLERANCE,
 )
 
 if TYPE_CHECKING:
     import matplotlib.pyplot as plt
+
+from kika.plotting import AngularDistributionPlotData, UncertaintyBand
 
 
 @dataclass
@@ -424,7 +427,7 @@ class ExforAngularDistribution(ExforEntry):
             - tuple: Select data in angle range [min, max]
             - None: Include all angles
         tolerance : float
-            Relative tolerance for matching (default: 0.05 = 5%)
+            Absolute tolerance in MeV for energy matching (default: 0.05 MeV)
         energy_unit : str
             Output energy unit (default: 'MeV')
         cross_section_unit : str
@@ -467,9 +470,10 @@ class ExforAngularDistribution(ExforEntry):
                     if block_energy < min_e_internal or block_energy > max_e_internal:
                         continue
                 else:
-                    # Single value with tolerance
+                    # Single value with absolute tolerance (tolerance is in MeV)
                     target_energy_internal = energy * internal_energy_factor
-                    if abs(block_energy - target_energy_internal) > tolerance * max(abs(target_energy_internal), 1e-10):
+                    tolerance_internal = tolerance * internal_energy_factor  # Convert tolerance to internal units
+                    if abs(block_energy - target_energy_internal) > tolerance_internal:
                         continue
 
             # Convert energy to output units
@@ -819,6 +823,31 @@ class ExforAngularDistribution(ExforEntry):
         return sigma_E
 
     # =========================================================================
+    # Representation Methods
+    # =========================================================================
+
+    def __repr__(self) -> str:
+        """Return a nicely formatted representation for notebooks."""
+        energies = self.energies()
+        n_energies = len(energies)
+        n_points = sum(len(block.get("data", [])) for block in self._data_blocks)
+
+        e_min = f"{energies.min():.4g}" if n_energies > 0 else "N/A"
+        e_max = f"{energies.max():.4g}" if n_energies > 0 else "N/A"
+
+        lines = [
+            "ExforAngularDistribution",
+            f"  Entry:       {self.entry}{self.subentry}",
+            f"  Label:       {self.label}",
+            f"  Target:      {self.target} (ZAID: {self.zaid})",
+            f"  Reaction:    {self.reaction.get('notation', 'N/A')}",
+            f"  Frame:       {self.angle_frame}",
+            f"  Energies:    {n_energies} ({e_min} - {e_max} {self.units['energy']})",
+            f"  Data points: {n_points}",
+        ]
+        return "\n".join(lines)
+
+    # =========================================================================
     # Serialization Methods
     # =========================================================================
 
@@ -906,3 +935,363 @@ class ExforAngularDistribution(ExforEntry):
         from kika.exfor.plotting import plot_exfor_ace_comparison
 
         return plot_exfor_ace_comparison(self, ace_data, energy, mt=mt, ax=ax, **kwargs)
+
+    def _to_plot_data_single_energy(
+        self,
+        energy: float,
+        frame: Optional[str],
+        angle_unit: str,
+        cross_section_unit: str,
+        uncertainty: bool,
+        connect_points: bool,
+        label: Optional[str],
+        include_natural_tag: bool = True,
+        **styling_kwargs
+    ) -> Union["AngularDistributionPlotData", Tuple["AngularDistributionPlotData", "UncertaintyBand"]]:
+        """
+        Extract plot data for a single energy.
+
+        This is a helper method called by to_plot_data() for each energy value.
+
+        Parameters
+        ----------
+        energy : float
+            Energy value in MeV
+        frame : str or None
+            Output frame ('LAB', 'CM', or None for current)
+        angle_unit : str
+            Angle unit ('cos' or 'deg')
+        cross_section_unit : str
+            Cross section unit ('b/sr' or 'mb/sr')
+        uncertainty : bool
+            Whether to return uncertainty band
+        connect_points : bool
+            Whether to connect data points with lines
+        label : str or None
+            Custom label (auto-generated if None)
+        include_natural_tag : bool, default True
+            If True and target is natural, append '[nat]' to auto-generated label
+        **styling_kwargs
+            Additional styling parameters
+
+        Returns
+        -------
+        AngularDistributionPlotData or tuple
+            PlotData, or (PlotData, UncertaintyBand) if uncertainty=True
+        """
+        # Work on a copy if frame conversion is needed
+        if frame is not None and frame.upper() != self.angle_frame:
+            if frame.upper() == FRAME_CM:
+                data_obj = self.convert_to_cm(inplace=False)
+            elif frame.upper() == FRAME_LAB:
+                data_obj = self.convert_to_lab(inplace=False)
+            else:
+                raise ValueError(f"Invalid frame '{frame}'. Must be 'LAB', 'CM', or None.")
+            output_frame = frame.upper()
+        else:
+            data_obj = self
+            output_frame = self.angle_frame
+
+        # Extract data using to_dataframe
+        # Use a very small tolerance here since 'energy' is already the exact value
+        # from the dataset (selected by to_plot_data). We just need to match it precisely.
+        df = data_obj.to_dataframe(
+            energy=energy,
+            tolerance=1e-9,  # Essentially exact match - energy is already selected
+            energy_unit="MeV",
+            cross_section_unit=cross_section_unit,
+            angle_unit=angle_unit,
+        )
+
+        if df.empty:
+            raise ValueError(
+                f"No data found at energy {energy} MeV. "
+                f"Available energies: {self.energies(unit='MeV')}"
+            )
+
+        # Get the actual energy value (may differ slightly due to tolerance)
+        actual_energy = df["energy"].iloc[0]
+
+        # Sort by angle for proper plotting
+        df = df.sort_values("angle")
+
+        # Extract arrays
+        angles = df["angle"].values
+        cross_sections = df["value"].values
+        errors = df["error"].values
+
+        # Generate label if not provided
+        if label is None:
+            base_label = self.label  # "Author et al. (Year)"
+            # Add [nat] suffix if target is natural element
+            if include_natural_tag and self.is_natural_target:
+                label = f"{base_label} [nat]"
+            else:
+                label = base_label
+
+        # Determine MT from process
+        mt = None
+        if self.process:
+            process_upper = self.process.upper()
+            if process_upper == "EL":
+                mt = 2
+            elif process_upper == "INL":
+                mt = 4
+            # Could add more mappings here
+
+        # Build metadata
+        metadata = {
+            "exfor_entry": self.entry,
+            "exfor_subentry": self.subentry,
+            "target": self.target,
+            "zaid": self.zaid,
+            "process": self.process,
+            "frame": output_frame,
+            "source": "EXFOR",
+        }
+
+        # For experimental data with errors, use errorbar plot type
+        # For experimental data without errors (or uncertainty=False), use scatter
+        has_errors = np.any(errors > 0)
+
+        # Get styling options
+        marker = styling_kwargs.pop("marker", "o")
+        markersize = styling_kwargs.pop("markersize", 5)
+        linestyle = styling_kwargs.pop("linestyle", None)
+        capsize = styling_kwargs.pop("capsize", 2)
+
+        # Determine linestyle based on connect_points
+        if linestyle is None:
+            linestyle = "-" if connect_points else "none"
+
+        if uncertainty and has_errors:
+            # Use errorbar plot type for experimental data with uncertainties
+            plot_data = AngularDistributionPlotData(
+                x=angles,
+                y=cross_sections,
+                energy=actual_energy,
+                isotope=self.target,
+                mt=mt,
+                distribution_type="experimental",
+                label=label,
+                plot_type="errorbar",
+                marker=marker,
+                markersize=markersize,
+                linestyle=linestyle,
+                **styling_kwargs,
+            )
+            # Store yerr in metadata for PlotBuilder to use
+            plot_data.metadata["yerr"] = errors
+            plot_data.metadata["capsize"] = capsize
+        else:
+            # Use scatter plot type (no error bars)
+            plot_data = AngularDistributionPlotData(
+                x=angles,
+                y=cross_sections,
+                energy=actual_energy,
+                isotope=self.target,
+                mt=mt,
+                distribution_type="experimental",
+                label=label,
+                plot_type="scatter",
+                marker=marker,
+                markersize=markersize,
+                # Don't pass linestyle to scatter - it doesn't support it
+                **styling_kwargs,
+            )
+
+        plot_data.metadata.update(metadata)
+
+        if not uncertainty:
+            return plot_data
+
+        # For errorbar type, we don't need a separate UncertaintyBand
+        # The errors are already in metadata['yerr']
+        # But return None as second element for API consistency
+        return plot_data, None
+
+    def to_plot_data(
+        self,
+        energy: Union[float, Tuple[float, float]] = None,
+        *,
+        tolerance: float = PLOTTING_ENERGY_TOLERANCE,
+        select_all_in_range: bool = False,
+        frame: Optional[str] = None,
+        angle_unit: str = "cos",
+        cross_section_unit: str = "b/sr",
+        uncertainty: bool = True,
+        connect_points: bool = False,
+        label: Optional[str] = None,
+        include_natural_tag: bool = True,
+        **styling_kwargs
+    ) -> Union[
+        "AngularDistributionPlotData",
+        Tuple["AngularDistributionPlotData", "UncertaintyBand"],
+        List[Union["AngularDistributionPlotData", Tuple["AngularDistributionPlotData", "UncertaintyBand"]]],
+        None
+    ]:
+        """
+        Extract angular distribution data for plotting with PlotBuilder.
+
+        This method returns data in a format compatible with kika's PlotBuilder,
+        enabling easy visualization and comparison of EXFOR experimental data
+        with theoretical calculations from ACE/ENDF files.
+
+        Parameters
+        ----------
+        energy : float, tuple, or None
+            Energy selection:
+            - float: Select data at specific energy (with absolute tolerance matching)
+            - tuple: Select data in energy range (min, max) in MeV
+            - None: Return data for all available energies
+        tolerance : float, default PLOTTING_ENERGY_TOLERANCE (0.01 MeV = 10 keV)
+            Absolute tolerance in MeV for energy matching.
+            Only used when energy is a single float value.
+        select_all_in_range : bool, default False
+            Controls behavior when energy is a single float:
+            - False (default): Return only data at the single closest energy within tolerance
+            - True: Return data at ALL energies within the tolerance range
+        frame : str or None, default None
+            Output reference frame:
+            - 'LAB': Convert to laboratory frame
+            - 'CM': Convert to center-of-mass frame
+            - None: Keep current frame (no conversion)
+        angle_unit : str, default 'cos'
+            Angle unit for x-axis:
+            - 'cos': Cosine of scattering angle (range [-1, 1])
+            - 'deg': Degrees (range [0, 180])
+        cross_section_unit : str, default 'b/sr'
+            Cross section unit for y-axis:
+            - 'b/sr': barns per steradian
+            - 'mb/sr': millibarns per steradian
+        uncertainty : bool, default True
+            If True, include error bars in the plot (uses 'errorbar' plot type).
+            If False, show only scatter points (uses 'scatter' plot type).
+        connect_points : bool, default False
+            If True, connect data points with lines.
+            If False (default), show only markers (scatter plot style).
+        label : str or None, default None
+            Custom label for legend. If None, auto-generates from author and year
+            (e.g., "Kinney et al. (1976)"). For natural targets, "[nat]" is appended
+            if include_natural_tag is True.
+        include_natural_tag : bool, default True
+            If True and the experiment's target is a natural element (ZAID ends in 000),
+            append '[nat]' to the label. This helps distinguish natural Fe from Fe-56.
+        **styling_kwargs
+            Additional styling parameters passed to PlotData:
+            - color: Line/marker color
+            - marker: Marker style (default: 'o')
+            - markersize: Marker size (default: 5)
+            - capsize: Error bar cap size (default: 2)
+            - alpha: Transparency
+
+        Returns
+        -------
+        PlotData, tuple, list, or None
+            - None if no data found within tolerance (allows graceful skipping in loops)
+            - Single energy with uncertainty=True:
+              Tuple[AngularDistributionPlotData, None]
+            - Single energy with uncertainty=False:
+              AngularDistributionPlotData
+            - Multiple energies (range or None):
+              List of the above, one per energy
+
+        Raises
+        ------
+        ValueError
+            If invalid parameters provided (invalid frame, units, etc.).
+
+        Examples
+        --------
+        >>> from kika.exfor import X4ProDatabase
+        >>> from kika.plotting import PlotBuilder
+        >>>
+        >>> db = X4ProDatabase()
+        >>> exfor = db.load_experiment("10571002")  # Kinney Fe-56
+        >>>
+        >>> # Plot at single energy with uncertainty band
+        >>> plot_data = exfor.to_plot_data(energy=5.0, frame='CM')
+        >>> if plot_data is not None:
+        ...     fig = PlotBuilder().add_data(plot_data).set_labels(
+        ...         x_label=r'$\\cos(\\theta)$',
+        ...         y_label=r'$d\\sigma/d\\Omega$ (b/sr)'
+        ...     ).build()
+        >>>
+        >>> # Plot without uncertainty
+        >>> plot_data = exfor.to_plot_data(energy=5.0, uncertainty=False)
+        >>>
+        >>> # Plot multiple energies in range
+        >>> plot_list = exfor.to_plot_data(energy=(1.0, 8.0))
+        >>> builder = PlotBuilder()
+        >>> for pd in plot_list:
+        ...     builder.add_data(pd)
+        >>> fig = builder.build()
+        """
+        # Validate parameters
+        if angle_unit not in ("cos", "deg"):
+            raise ValueError(f"Invalid angle_unit '{angle_unit}'. Must be 'cos' or 'deg'.")
+        if cross_section_unit not in ("b/sr", "mb/sr"):
+            raise ValueError(f"Invalid cross_section_unit '{cross_section_unit}'. Must be 'b/sr' or 'mb/sr'.")
+        if frame is not None and frame.upper() not in (FRAME_LAB, FRAME_CM):
+            raise ValueError(f"Invalid frame '{frame}'. Must be 'LAB', 'CM', or None.")
+
+        # Get all available energies
+        available_energies = self.energies(unit="MeV")
+
+        if len(available_energies) == 0:
+            raise ValueError("No energy data available in this EXFOR entry.")
+
+        # Determine which energies to process
+        if energy is None:
+            # All energies
+            selected_energies = available_energies
+        elif isinstance(energy, tuple):
+            # Energy range
+            e_min, e_max = energy
+            mask = (available_energies >= e_min) & (available_energies <= e_max)
+            selected_energies = available_energies[mask]
+            if len(selected_energies) == 0:
+                raise ValueError(
+                    f"No data in energy range ({e_min}, {e_max}) MeV. "
+                    f"Available energies: {available_energies}"
+                )
+        else:
+            # Single energy with absolute tolerance matching
+            energy_float = float(energy)
+            # Find energies within absolute tolerance
+            abs_diff = np.abs(available_energies - energy_float)
+            within_tolerance = abs_diff <= tolerance
+            if not np.any(within_tolerance):
+                # No data within tolerance - return None for graceful skipping
+                return None
+
+            if select_all_in_range:
+                # Return all energies within tolerance range
+                selected_energies = available_energies[within_tolerance]
+            else:
+                # Only the closest energy within tolerance
+                matching_energies = available_energies[within_tolerance]
+                closest_idx = np.argmin(np.abs(matching_energies - energy_float))
+                selected_energies = [matching_energies[closest_idx]]
+
+        # Process each selected energy
+        results = []
+        for e in selected_energies:
+            result = self._to_plot_data_single_energy(
+                energy=e,
+                frame=frame,
+                angle_unit=angle_unit,
+                cross_section_unit=cross_section_unit,
+                uncertainty=uncertainty,
+                connect_points=connect_points,
+                label=label,
+                include_natural_tag=include_natural_tag,
+                **styling_kwargs
+            )
+            results.append(result)
+
+        # Return single item if only one energy selected
+        if len(results) == 1:
+            return results[0]
+
+        return results

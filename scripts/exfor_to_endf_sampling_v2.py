@@ -102,6 +102,19 @@ import time
 ENDF_FILE = "/soft_snc/lib/endf/jeff40/neutrons/26-Fe-56g.txt"  # Reference ENDF file
 EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data/"      # Directory with EXFOR JSON files
 
+# Database configuration (X4Pro SQLite database)
+EXFOR_DB_PATH = None  # Path to X4Pro database (None uses KIKA_X4PRO_DB_PATH env var or default)
+EXFOR_SOURCE = "database"  # Data source: "json", "database", "auto", or "both"
+# Filter options for database queries
+TARGET_ZAID = 26056  # Target ZAID (e.g., 26056 for Fe-56)
+TARGET_PROJECTILE = "N"  # Projectile (N for neutrons)
+
+# Supplementary JSON files (for experiments not in database)
+# These files will be loaded in addition to the database data
+SUPPLEMENTARY_JSON_FILES = [
+    # "C:/Users/Usuario/BaradDur/EXFOR/data_v1/data_v1/27673002.json",  # Gkatis (2025)
+]
+
 # Output configuration
 OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/EXFOR_FIT_JEFF_V2/"  # Output directory
 N_SAMPLES = 10                                   # Number of ENDF samples to generate
@@ -171,7 +184,27 @@ GLOBAL_CONV_LAMBDA = 0.001
 # =============================================================================
 # EXPERIMENT SELECTION METHOD
 # =============================================================================
-EXPERIMENT_SELECTION_METHOD = "global_convolution"    # Recommended
+# Available methods:
+#
+# 1. "global_convolution" (RECOMMENDED)
+#    Fits ALL energy points simultaneously using Tikhonov regularization.
+#    Properly accounts for energy resolution smearing across energy bins.
+#    Each EXFOR measurement contributes to multiple ENDF energies according
+#    to its resolution-weighted probability. Enforces smooth energy dependence.
+#    Uses GLOBAL_CONV_LAMBDA for regularization strength.
+#
+# 2. "kernel_weights"
+#    Fits each ENDF energy point independently using Gaussian kernel weighting.
+#    EXFOR data are weighted by g_ij = exp(-0.5 * ((E_i - E_j)/σE)²)
+#    Uses N_SIGMA_CUTOFF to limit the energy window (±N_SIGMA_CUTOFF * σE).
+#    Good for debugging or when global smoothing is not desired.
+#
+# 3. "energy_bin"
+#    Simple energy binning without resolution-based weighting.
+#    Uses hard bin boundaries (no Gaussian weighting).
+#    Fastest but ignores energy resolution effects.
+#
+EXPERIMENT_SELECTION_METHOD = "global_convolution"
 
 # =============================================================================
 # END OF CONFIGURATION
@@ -495,16 +528,43 @@ def perform_nominal_fits(
 # For the migration, we'll import the main run function logic
 
 
-def load_exfor_with_new_api(exfor_directory: str, logger=None):
+def load_exfor_with_new_api(
+    exfor_directory: str = None,
+    db_path: str = None,
+    source: str = "auto",
+    target_zaid: int = None,
+    projectile: str = "N",
+    mt: int = None,
+    energy_range: tuple = None,
+    supplementary_json_files: List[str] = None,
+    logger=None,
+):
     """
     Load EXFOR data using the new kika.exfor module API.
+
+    Supports multiple data sources: JSON files, X4Pro database, or automatic
+    fallback (database with JSON fallback for missing entries).
 
     Returns data in the legacy format for compatibility with existing code.
 
     Parameters
     ----------
-    exfor_directory : str
-        Path to EXFOR data directory
+    exfor_directory : str, optional
+        Path to EXFOR data directory (for JSON source or fallback)
+    db_path : str, optional
+        Path to X4Pro database. Uses KIKA_X4PRO_DB_PATH env var if None.
+    source : str, optional
+        Data source: "json", "database", "auto" (default), or "both"
+    target_zaid : int, optional
+        Target ZAID for database queries (e.g., 26056 for Fe-56)
+    projectile : str, optional
+        Projectile for database queries (default: "N")
+    mt : int, optional
+        ENDF MT number for database queries
+    energy_range : tuple, optional
+        (min, max) energy range in MeV for filtering
+    supplementary_json_files : List[str], optional
+        List of additional JSON file paths to load (for experiments not in database)
     logger : optional
         Logger instance
 
@@ -517,12 +577,34 @@ def load_exfor_with_new_api(exfor_directory: str, logger=None):
     """
     if logger:
         logger.info(f"  Using NEW kika.exfor module (read_all_exfor)")
+        logger.info(f"  Data source: {source}")
+        if source in ("database", "auto", "both"):
+            logger.info(f"  Database path: {db_path or 'default (env var or builtin)'}")
+            if target_zaid:
+                logger.info(f"  Target ZAID: {target_zaid}")
+        if supplementary_json_files:
+            logger.info(f"  Supplementary JSON files: {len(supplementary_json_files)}")
+            for f in supplementary_json_files:
+                logger.info(f"    - {f}")
 
-    # Load with new API - get all objects by filename
-    exfor_dict = read_all_exfor(exfor_directory, group_by_energy=False)
+    # Load with new API - get all objects by identifier
+    exfor_dict = read_all_exfor(
+        directory=exfor_directory,
+        group_by_energy=False,
+        source=source,
+        db_path=db_path,
+        target_zaid=target_zaid,
+        projectile=projectile,
+        mt=mt,
+        energy_range=energy_range,
+        supplementary_json_files=supplementary_json_files,
+    )
 
     # Extract list of ExforAngularDistribution objects
     exfor_objects = list(exfor_dict.values())
+
+    if logger:
+        logger.info(f"  Loaded {len(exfor_objects)} EXFOR datasets")
 
     # Convert to legacy format using build_exfor_cache_from_objects
     exfor_cache, sorted_energies = build_exfor_cache_from_objects(exfor_objects)
@@ -532,12 +614,12 @@ def load_exfor_with_new_api(exfor_directory: str, logger=None):
 
 def run_exfor_to_endf_sampling_v2(
     endf_file: str,
-    exfor_directory: str,
-    output_dir: str,
-    n_samples: int,
-    energy_min_mev: float,
-    energy_max_mev: float,
-    mt_number: int,
+    exfor_directory: str = None,
+    output_dir: str = None,
+    n_samples: int = 10,
+    energy_min_mev: float = 1.0,
+    energy_max_mev: float = 3.0,
+    mt_number: int = 2,
     max_degree: int = 8,
     select_degree: Optional[str] = "aicc",
     ridge_lambda: float = 0.0,
@@ -566,6 +648,12 @@ def run_exfor_to_endf_sampling_v2(
     generate_samples_endf: bool = True,
     generate_covariance: bool = True,
     generate_mf34: bool = False,
+    # Database configuration (new parameters)
+    exfor_db_path: str = None,
+    exfor_source: str = "auto",
+    target_zaid: int = None,
+    target_projectile: str = "N",
+    supplementary_json_files: List[str] = None,
 ):
     """
     Main function to generate ENDF samples from EXFOR angular distribution data.
@@ -575,6 +663,25 @@ def run_exfor_to_endf_sampling_v2(
     CHANGES FROM v1:
     - Uses read_all_exfor() from kika.exfor instead of load_all_exfor_data()
     - Uses create_mf34_from_covariance and write_mf34_to_file from kika.endf.writers
+    - Supports X4Pro database backend in addition to JSON files
+
+    Parameters
+    ----------
+    endf_file : str
+        Path to reference ENDF file
+    exfor_directory : str, optional
+        Path to EXFOR JSON files directory
+    output_dir : str
+        Output directory for generated files
+    exfor_db_path : str, optional
+        Path to X4Pro database. Uses KIKA_X4PRO_DB_PATH env var if None.
+    exfor_source : str, optional
+        Data source: "json", "database", "auto" (default), or "both"
+    target_zaid : int, optional
+        Target ZAID for database queries (e.g., 26056 for Fe-56)
+    target_projectile : str, optional
+        Projectile for database queries (default: "N")
+    (other parameters documented inline)
     """
     global _logger
 
@@ -616,17 +723,29 @@ def run_exfor_to_endf_sampling_v2(
         _logger.error(f"EXFOR directory not found: {exfor_directory}", console=True)
         return
 
-    # Step 1: Pre-load EXFOR data (using NEW API)
+    # Step 1: Pre-load EXFOR data (using NEW API with database support)
     _logger.info("")
     _logger.info("[STEP 1] Pre-loading EXFOR data using NEW kika.exfor module")
+    _logger.info(f"  Source: {exfor_source}")
+    if exfor_source in ("database", "auto", "both"):
+        _logger.info(f"  Database: {exfor_db_path or 'default'}")
+    if exfor_directory:
+        _logger.info(f"  JSON directory: {exfor_directory}")
 
-    print(f"[INFO] Pre-loading EXFOR data from {exfor_directory}")
+    print(f"[INFO] Pre-loading EXFOR data (source={exfor_source})")
     t_exfor_start = time.time()
 
     try:
         exfor_cache, sorted_exfor_energies = load_exfor_with_new_api(
-            exfor_directory,
-            logger=_logger
+            exfor_directory=exfor_directory,
+            db_path=exfor_db_path,
+            source=exfor_source,
+            target_zaid=target_zaid,
+            projectile=target_projectile,
+            mt=mt_number,
+            energy_range=(energy_min_mev, energy_max_mev) if energy_min_mev and energy_max_mev else None,
+            supplementary_json_files=supplementary_json_files,
+            logger=_logger,
         )
         t_exfor_elapsed = time.time() - t_exfor_start
 
@@ -935,4 +1054,10 @@ if __name__ == "__main__":
         generate_samples_endf=GENERATE_SAMPLES_ENDF,
         generate_covariance=GENERATE_COVARIANCE,
         generate_mf34=GENERATE_MF34,
+        # Database configuration
+        exfor_db_path=EXFOR_DB_PATH,
+        exfor_source=EXFOR_SOURCE,
+        target_zaid=TARGET_ZAID,
+        target_projectile=TARGET_PROJECTILE,
+        supplementary_json_files=SUPPLEMENTARY_JSON_FILES,
     )

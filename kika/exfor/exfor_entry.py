@@ -177,6 +177,22 @@ class ExforEntry:
         """Return projectile (e.g., 'n')."""
         return self.reaction.get("projectile", "n")
 
+    @property
+    def is_natural_target(self) -> bool:
+        """
+        Check if the experiment target is a natural element (not a specific isotope).
+
+        Natural targets have ZAID ending in 000 (e.g., Fe-nat = 26000).
+        Specific isotopes have the mass number (e.g., Fe-56 = 26056).
+
+        Returns
+        -------
+        bool
+            True if target is natural element, False if specific isotope.
+        """
+        zaid = self.zaid
+        return zaid > 0 and (zaid % 1000) == 0
+
     # =========================================================================
     # Serialization Methods
     # =========================================================================

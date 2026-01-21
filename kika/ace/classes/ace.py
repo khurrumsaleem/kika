@@ -28,6 +28,7 @@ from kika.ace.classes.secondary_particles.secondary_particle_reactions import Se
 from kika.ace.classes.secondary_particles.secondary_particles_types import SecondaryParticleTypes
 from kika.ace.classes.esz import EszBlock
 from kika.ace.classes.ace_repr import ace_repr
+from kika._constants import MT_COMPOSITES, MT_COMPOSITE_ORDER
 
 
 @dataclass

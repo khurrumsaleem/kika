@@ -484,7 +484,48 @@ class CovMat:
             if iso == isotope:
                 new_cov.cross_sections[(iso, mt)] = xs.copy()
 
-        return new_cov              
+        return new_cov
+
+    def filter_by_isotopes(self, isotopes: Sequence[int]) -> "CovMat":
+        """
+        Return a new CovMat containing only matrices where BOTH row and column
+        isotopes are in the specified list. Preserves cross-isotope blocks.
+
+        Parameters
+        ----------
+        isotopes : Sequence[int]
+            List of isotope ZAIDs to include
+
+        Returns
+        -------
+        CovMat
+            Filtered CovMat containing only matrices involving the specified isotopes
+        """
+        isotope_set = set(isotopes)
+        idxs = [
+            i for i, (iso_r, iso_c) in enumerate(
+                zip(self.isotope_rows, self.isotope_cols)
+            ) if iso_r in isotope_set and iso_c in isotope_set
+        ]
+
+        new_cov = CovMat(
+            num_groups=self.num_groups,
+            energy_grid=self.energy_grid.copy() if self.energy_grid else None,
+        )
+
+        for i in idxs:
+            new_cov.isotope_rows.append(self.isotope_rows[i])
+            new_cov.reaction_rows.append(self.reaction_rows[i])
+            new_cov.isotope_cols.append(self.isotope_cols[i])
+            new_cov.reaction_cols.append(self.reaction_cols[i])
+            new_cov.matrices.append(self.matrices[i])
+
+        # Copy cross sections for selected isotopes
+        for (iso, mt), xs in self.cross_sections.items():
+            if iso in isotope_set:
+                new_cov.cross_sections[(iso, mt)] = xs.copy()
+
+        return new_cov
 
     def to_dataframe(self) -> pd.DataFrame:
         '''
@@ -1066,7 +1107,7 @@ class CovMat:
     
     def to_heatmap_data(
         self,
-        nuclide: Union[int, str],
+        nuclide: Union[int, str, Sequence[Union[int, str]]],
         mt: Union[int, Sequence[int], Tuple[int, int]],
         *,
         matrix_type: str = 'corr',
@@ -1076,21 +1117,22 @@ class CovMat:
     ) -> 'CovarianceHeatmapData':
         """
         Prepare covariance heatmap data for PlotBuilder rendering.
-        
+
         This method extracts the relevant matrix data, computes uncertainties,
         and packages everything into a CovarianceHeatmapData object that can
         be rendered by PlotBuilder.add_heatmap().
-        
+
         Parameters
         ----------
-        nuclide : int or str
-            Isotope identifier. Can be either:
+        nuclide : int, str, or sequence of int/str
+            Isotope identifier(s). Can be:
             - Integer ZAID (e.g., 92235 for U-235)
             - Element-mass string (e.g., 'U235', 'Fe56')
+            - List of ZAIDs or strings for multi-isotope heatmaps (e.g., ['Fe54', 'Fe56'])
         mt : int, sequence of int, or tuple of (row_mt, col_mt)
             MT reaction number(s). Can be:
             - Single int: diagonal block for that MT
-            - Sequence of ints: diagonal blocks for those MTs  
+            - Sequence of ints: diagonal blocks for those MTs
             - Tuple of (row_mt, col_mt): off-diagonal block between row and column MT
         matrix_type : str, default 'corr'
             Type of matrix: 'corr'/'correlation' for correlation matrix,
@@ -1101,12 +1143,12 @@ class CovMat:
             Energy window (emin, emax). Only bins overlapping the window are kept.
         **kwargs
             Additional parameters (reserved for future use)
-            
+
         Returns
         -------
         CovarianceHeatmapData
             Heatmap data object ready for PlotBuilder.add_heatmap()
-            
+
         Examples
         --------
         >>> # Simple usage with PlotBuilder
@@ -1114,19 +1156,16 @@ class CovMat:
         >>> heatmap_data = covmat.to_heatmap_data(nuclide=92235, mt=[2, 18, 102])
         >>> fig = PlotBuilder(style='light').add_heatmap(heatmap_data)
         >>> fig.show()
-        
+
         >>> # Can also use string symbols
         >>> heatmap_data = covmat.to_heatmap_data(nuclide='U235', mt=2, matrix_type='cov')
+
+        >>> # Multi-isotope heatmap
+        >>> heatmap_data = covmat.to_heatmap_data(nuclide=['Fe54', 'Fe56'], mt=[2, 18])
         """
         from kika.plotting.plot_data import CovarianceHeatmapData
         from kika._utils import symbol_to_zaid
-        
-        # Convert nuclide to ZAID if string
-        if isinstance(nuclide, str):
-            zaid = symbol_to_zaid(nuclide)
-        else:
-            zaid = nuclide
-        
+
         # Normalize matrix_type parameter
         matrix_type_normalized = matrix_type.lower()
         if matrix_type_normalized in ("corr", "correlation"):
@@ -1137,7 +1176,7 @@ class CovMat:
             raise ValueError(
                 f"matrix_type must be 'corr'/'correlation' or 'cov'/'covariance', got '{matrix_type}'"
             )
-        
+
         # Normalize scale parameter
         scale_normalized = scale.lower()
         if scale_normalized in ("log", "logarithmic"):
@@ -1148,6 +1187,23 @@ class CovMat:
             raise ValueError(
                 f"scale must be 'log'/'logarithmic' or 'lin'/'linear', got '{scale}'"
             )
+
+        # Normalize nuclide(s) to ZAID(s) - detect multi-isotope case
+        if isinstance(nuclide, (list, tuple)) and not isinstance(nuclide, str):
+            zaids = [symbol_to_zaid(n) if isinstance(n, str) else n for n in nuclide]
+            if len(zaids) > 1:
+                # Multi-isotope case - delegate to specialized method
+                return self._to_heatmap_data_multi_isotope(
+                    zaids=zaids, mt=mt, matrix_type=matrix_type_normalized,
+                    scale=scale_normalized, energy_range=energy_range, **kwargs
+                )
+            zaid = zaids[0]  # Single element list - use existing logic
+        else:
+            # Single nuclide (int or str)
+            if isinstance(nuclide, str):
+                zaid = symbol_to_zaid(nuclide)
+            else:
+                zaid = nuclide
 
         def _transform_edges(edges: np.ndarray) -> np.ndarray:
             if scale_normalized == "log":
@@ -1182,6 +1238,12 @@ class CovMat:
         if iso_cov.energy_grid is None:
             raise ValueError("Covariance matrix missing energy grid information for plotting.")
         edges_raw_full = np.asarray(iso_cov.energy_grid, dtype=float)
+
+        # Convert to eV if energy is in different units (for consistency with MF34)
+        energy_unit = getattr(self, 'energy_unit', 'eV')
+        if energy_unit.lower() == 'mev':
+            edges_raw_full = edges_raw_full * 1e6  # MeV to eV
+
         edges_cropped, keep_mask = _crop_edges(edges_raw_full)
         G = len(edges_cropped) - 1
 
@@ -1347,7 +1409,244 @@ class CovMat:
             else:
                 heatmap_data.metadata[key] = val
         return heatmap_data
-    
+
+    def _to_heatmap_data_multi_isotope(
+        self,
+        zaids: List[int],
+        mt: Union[int, Sequence[int], Tuple[int, int]],
+        matrix_type: str,
+        scale: str,
+        energy_range: Optional[Tuple[float, float]] = None,
+        **kwargs
+    ) -> 'CovarianceHeatmapData':
+        """
+        Internal method to prepare multi-isotope covariance heatmap data.
+
+        This method handles the case where multiple isotopes are provided,
+        creating a flattened multiblock heatmap showing cross-isotope correlations.
+
+        Parameters
+        ----------
+        zaids : List[int]
+            List of isotope ZAIDs
+        mt : int, sequence of int, or tuple
+            MT reaction number(s)
+        matrix_type : str
+            Normalized matrix type ('corr' or 'cov')
+        scale : str
+            Normalized scale ('log' or 'linear')
+        energy_range : tuple of float, optional
+            Energy window (emin, emax)
+        **kwargs
+            Additional parameters
+
+        Returns
+        -------
+        CovarianceHeatmapData
+            Heatmap data object for multi-isotope visualization
+        """
+        from kika.plotting.plot_data import CovarianceHeatmapData
+        from kika._utils import zaid_to_symbol
+
+        # Filter to include only the specified isotopes
+        iso_cov = self.filter_by_isotopes(zaids)
+        if iso_cov.num_groups == 0:
+            raise ValueError(f"No data found for isotopes {zaids}")
+
+        if iso_cov.energy_grid is None:
+            raise ValueError("Covariance matrix missing energy grid information for plotting.")
+
+        # Parse MT input
+        if isinstance(mt, tuple) and len(mt) == 2:
+            # Off-diagonal specification - not supported for multi-isotope
+            raise ValueError(
+                "Off-diagonal MT specification (row_mt, col_mt) is not supported for multi-isotope heatmaps. "
+                "Use a list of MTs instead."
+            )
+
+        # Normalize to list of MTs
+        if isinstance(mt, int):
+            mts = [mt]
+        else:
+            mts = sorted(list(mt))
+
+        # Build ordered list of (zaid, mt) blocks
+        # Sort by (zaid, mt) to ensure consistent ordering
+        blocks = []
+        for z in sorted(zaids):
+            for m in mts:
+                # Check if this (zaid, mt) pair exists in the data
+                pairs = iso_cov._get_param_pairs()
+                if (z, m) in pairs:
+                    blocks.append((z, m))
+
+        if not blocks:
+            raise ValueError(f"No data found for the specified isotopes and MTs")
+
+        # Energy grid handling - convert to eV for consistency with MF34
+        G = iso_cov.num_groups
+        edges_raw_full = np.asarray(iso_cov.energy_grid, dtype=float)
+
+        # Convert to eV if energy is in different units
+        energy_unit = getattr(self, 'energy_unit', 'eV')
+        if energy_unit.lower() == 'mev':
+            edges_raw_full = edges_raw_full * 1e6  # MeV to eV
+
+        # Handle energy range cropping
+        if energy_range is not None:
+            emin, emax = energy_range
+            if not (np.isfinite(emin) and np.isfinite(emax)) or emin >= emax:
+                raise ValueError("energy_range must be a tuple (emin, emax) with emin < emax.")
+            keep_mask = (edges_raw_full[1:] > float(emin)) & (edges_raw_full[:-1] < float(emax))
+            if not np.any(keep_mask):
+                raise ValueError("energy_range removed all groups; nothing to plot.")
+            first, last = np.where(keep_mask)[0][[0, -1]]
+            edges_cropped = edges_raw_full[first:last + 2]
+        else:
+            keep_mask = np.ones(G, dtype=bool)
+            edges_cropped = edges_raw_full
+
+        G_cropped = len(edges_cropped) - 1
+
+        # Transform edges based on scale
+        if scale == "log":
+            transformed_edges = np.log10(np.maximum(edges_cropped, 1e-300).astype(float))
+        else:
+            transformed_edges = edges_cropped.astype(float)
+
+        width = transformed_edges[-1] - transformed_edges[0]
+
+        # Build the multiblock matrix
+        n_blocks = len(blocks)
+        matrix_size = n_blocks * G_cropped
+        M_full = np.zeros((matrix_size, matrix_size))
+
+        # Get full matrices
+        pairs = iso_cov._get_param_pairs()
+        idx_map = {p: i for i, p in enumerate(pairs)}
+
+        if matrix_type == 'corr':
+            full_matrix = iso_cov.clipped_correlation_matrix
+            mask_value = 0.0
+        else:
+            full_matrix = iso_cov.covariance_matrix
+            mask_value = None
+
+        # Fill in the multiblock matrix
+        for i, (z_row, mt_row) in enumerate(blocks):
+            for j, (z_col, mt_col) in enumerate(blocks):
+                # Get indices in the full correlation/covariance matrix
+                row_pair_idx = idx_map.get((z_row, mt_row))
+                col_pair_idx = idx_map.get((z_col, mt_col))
+
+                if row_pair_idx is None or col_pair_idx is None:
+                    continue
+
+                # Extract subblock (with energy cropping)
+                row_start_full = row_pair_idx * iso_cov.num_groups
+                col_start_full = col_pair_idx * iso_cov.num_groups
+                row_indices_full = list(range(row_start_full, row_start_full + iso_cov.num_groups))
+                col_indices_full = list(range(col_start_full, col_start_full + iso_cov.num_groups))
+                row_indices = [row_indices_full[k] for k, keep in enumerate(keep_mask) if keep]
+                col_indices = [col_indices_full[k] for k, keep in enumerate(keep_mask) if keep]
+
+                subblock = full_matrix[np.ix_(row_indices, col_indices)]
+
+                # Place in multiblock matrix
+                row_start = i * G_cropped
+                col_start = j * G_cropped
+                M_full[row_start:row_start + G_cropped, col_start:col_start + G_cropped] = subblock
+
+        # Build coordinate edges
+        x_parts = []
+        energy_ranges = {}
+        for i, block in enumerate(blocks):
+            start = i * width
+            block_edges = (transformed_edges - transformed_edges[0]) + start
+            x_parts.append(block_edges if i == 0 else block_edges[1:])
+            energy_ranges[block] = (block_edges[0], block_edges[-1])
+
+        x_edges = np.concatenate(x_parts) if x_parts else None
+        y_edges = x_edges.copy() if x_edges is not None else None
+        extent = (float(x_edges[0]), float(x_edges[-1]), float(y_edges[0]), float(y_edges[-1])) if x_edges is not None else None
+
+        # Build block_info with multi-isotope structure
+        block_info = {
+            'blocks': blocks,  # List of (zaid, mt) tuples
+            'zaids': sorted(zaids),
+            'mts': mts,
+            'G': G_cropped,
+            'ranges': {block: (i * G_cropped, (i + 1) * G_cropped) for i, block in enumerate(blocks)},
+            'energy_ranges': energy_ranges,
+            'is_multi_isotope': True,
+        }
+
+        # Compute uncertainties keyed by (zaid, mt) tuples
+        uncertainty_data = {}
+        cov_matrix = iso_cov.covariance_matrix
+
+        for block in blocks:
+            z, m = block
+            pair_idx = idx_map.get((z, m))
+            if pair_idx is None:
+                continue
+
+            base_indices_full = list(range(pair_idx * iso_cov.num_groups, (pair_idx + 1) * iso_cov.num_groups))
+            mt_rows = [base_indices_full[k] for k, keep in enumerate(keep_mask) if keep]
+
+            diag_variance = np.diag(cov_matrix)[mt_rows]
+
+            # Use cross sections if available
+            if (z, m) in self.cross_sections:
+                nominal_xs_full = np.asarray(self.cross_sections[(z, m)], dtype=float)
+                nominal_xs = nominal_xs_full[keep_mask] if nominal_xs_full.size == iso_cov.num_groups else nominal_xs_full
+
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    sigma_percent = np.sqrt(np.abs(diag_variance)) / np.abs(nominal_xs) * 100.0
+                    sigma_percent = np.nan_to_num(sigma_percent, nan=0.0, posinf=0.0, neginf=0.0)
+            else:
+                sigma_percent = np.sqrt(np.abs(diag_variance)) * 100.0
+
+            uncertainty_data[block] = sigma_percent
+
+        if not uncertainty_data:
+            uncertainty_data = None
+
+        # Generate labels in "Symbol-MT#" format
+        mt_labels = [f"{zaid_to_symbol(z)}-MT{m}" for (z, m) in blocks]
+
+        # No default title - user can set via set_labels() on HeatmapBuilder
+        label = None
+
+        # Create and return CovarianceHeatmapData
+        heatmap_data = CovarianceHeatmapData(
+            matrix_data=M_full,
+            matrix_type=matrix_type,
+            zaid=zaids,  # Now stores list of ZAIDs
+            block_info=block_info,
+            uncertainty_data=uncertainty_data,
+            energy_grid=edges_cropped,
+            mt_labels=mt_labels,
+            is_diagonal=True,
+            mask_value=mask_value,
+            scale=scale,
+            x_edges=x_edges,
+            y_edges=y_edges,
+            extent=extent,
+            label=label
+        )
+
+        # Apply any extra heatmap kwargs
+        for key, val in kwargs.items():
+            if key == "mask_color":
+                continue
+            if hasattr(heatmap_data, key):
+                setattr(heatmap_data, key, val)
+            else:
+                heatmap_data.metadata[key] = val
+
+        return heatmap_data
+
     def plot_covariance_heatmap(
         self,
         nuclide: Union[int, str],

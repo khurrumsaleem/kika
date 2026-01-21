@@ -1246,6 +1246,55 @@ class HeatmapBuilder(PlotBuilder):
         if not data.block_info:
             return None
 
+        # Check for multi-isotope mode
+        is_multi_isotope = data.block_info.get('is_multi_isotope', False)
+
+        if is_multi_isotope:
+            # Multi-isotope mode: blocks are (zaid, mt) tuples
+            blocks = data.block_info.get('blocks', [])
+            energy_ranges = data.block_info.get('energy_ranges', {}) or {}
+            # Use provided mt_labels (should already be "Symbol-MT#" format)
+            block_labels = data.mt_labels or [f"({z}, {m})" for (z, m) in blocks]
+
+            pending_block_labels = None
+            x_ranges = []
+            for block in blocks:
+                xr = energy_ranges.get(block)
+                if xr is not None:
+                    x_ranges.append(tuple(xr))
+
+            if x_ranges and self._heatmap_show_block_labels:
+                centers = [(a + b) * 0.5 for (a, b) in x_ranges]
+                ax.set_xticks([])
+                ax.set_yticks([])
+                pending_block_labels = {
+                    'centers': centers,
+                    'labels': block_labels,
+                    'full_xlim': full_xlim,
+                    'full_ylim': full_ylim,
+                    'x_axis_label': "Isotope-MT",
+                    'y_axis_label': "Isotope-MT"
+                }
+            elif not self._heatmap_show_block_labels:
+                ax.set_xticks([])
+                ax.set_yticks([])
+
+            # Energy ticks on secondary axes
+            if self._heatmap_show_energy_ticks and data.energy_grid is not None and len(data.energy_grid) > 0:
+                if len(blocks) > 1 and energy_ranges:
+                    energy_grids_dict = {block: data.energy_grid for block in blocks}
+                    block_ranges_dict = {block: tuple(energy_ranges[block]) for block in blocks if block in energy_ranges}
+                    if block_ranges_dict:
+                        self._add_multi_block_energy_ticks(ax, energy_grids_dict, block_ranges_dict, data.scale,
+                                                            energy_x_lim, energy_y_lim)
+                    else:
+                        self._add_energy_ticks(ax, data.energy_grid, data.scale)
+                else:
+                    self._add_energy_ticks(ax, data.energy_grid, data.scale)
+
+            return pending_block_labels
+
+        # Single-isotope mode (existing logic)
         mts = data.block_info.get('mts', [])
         energy_ranges = data.block_info.get('energy_ranges', {}) or {}
         ranges_fallback = data.block_info.get('ranges', []) or []
@@ -1744,25 +1793,41 @@ class HeatmapBuilder(PlotBuilder):
 
         if isinstance(heatmap_data, CovarianceHeatmapData):
             info = heatmap_data.block_info or {}
-            mts = info.get('mts', [])
-            energy_ranges = info.get('energy_ranges', {}) or {}
-            ranges_fallback = info.get('ranges', []) or []
 
-            if heatmap_data.is_diagonal:
-                for i, m in enumerate(mts):
-                    rng = energy_ranges.get(m)
-                    if rng is None and i < len(ranges_fallback):
-                        rng = ranges_fallback[i]
+            # Check for multi-isotope mode
+            is_multi_isotope = info.get('is_multi_isotope', False)
+
+            if is_multi_isotope:
+                # Multi-isotope: blocks keyed by (zaid, mt) tuples
+                blocks = info.get('blocks', [])
+                energy_ranges = info.get('energy_ranges', {}) or {}
+
+                for block in blocks:
+                    rng = energy_ranges.get(block)
                     if rng is not None:
                         ranges_x.append(tuple(rng))
                         ranges_y.append(tuple(rng))
-            elif len(mts) >= 2:
-                col_rng = energy_ranges.get(mts[1]) or (ranges_fallback[1] if len(ranges_fallback) > 1 else None)
-                row_rng = energy_ranges.get(mts[0]) or (ranges_fallback[0] if ranges_fallback else None)
-                if col_rng is not None:
-                    ranges_x.append(tuple(col_rng))
-                if row_rng is not None:
-                    ranges_y.append(tuple(row_rng))
+            else:
+                # Single-isotope mode
+                mts = info.get('mts', [])
+                energy_ranges = info.get('energy_ranges', {}) or {}
+                ranges_fallback = info.get('ranges', []) or []
+
+                if heatmap_data.is_diagonal:
+                    for i, m in enumerate(mts):
+                        rng = energy_ranges.get(m)
+                        if rng is None and i < len(ranges_fallback):
+                            rng = ranges_fallback[i]
+                        if rng is not None:
+                            ranges_x.append(tuple(rng))
+                            ranges_y.append(tuple(rng))
+                elif len(mts) >= 2:
+                    col_rng = energy_ranges.get(mts[1]) or (ranges_fallback[1] if len(ranges_fallback) > 1 else None)
+                    row_rng = energy_ranges.get(mts[0]) or (ranges_fallback[0] if ranges_fallback else None)
+                    if col_rng is not None:
+                        ranges_x.append(tuple(col_rng))
+                    if row_rng is not None:
+                        ranges_y.append(tuple(row_rng))
 
         elif isinstance(heatmap_data, MF34HeatmapData):
             info = heatmap_data.block_info or {}
@@ -1839,10 +1904,23 @@ class HeatmapBuilder(PlotBuilder):
         energy_ranges = cropped_block_info.get('energy_ranges', {})
         scale = getattr(original_data, 'scale', 'log')
 
-        # Get block keys (MTs or Legendre coefficients)
+        # Check for multi-isotope mode
+        is_multi_isotope = cropped_block_info.get('is_multi_isotope', False)
+
+        # Get block keys (MTs, Legendre coefficients, or (zaid, mt) tuples)
         if isinstance(original_data, CovarianceHeatmapData):
-            block_keys = cropped_block_info.get('mts', [])
-            block_labels = [f"MT {m}" for m in block_keys]
+            if is_multi_isotope:
+                # Multi-isotope: use (zaid, mt) tuples from blocks
+                block_keys = cropped_block_info.get('blocks', [])
+                # Use provided mt_labels if available
+                if original_data.mt_labels and len(original_data.mt_labels) == len(block_keys):
+                    block_labels = original_data.mt_labels
+                else:
+                    from kika._utils import zaid_to_symbol
+                    block_labels = [f"{zaid_to_symbol(z)}-MT{m}" for (z, m) in block_keys]
+            else:
+                block_keys = cropped_block_info.get('mts', [])
+                block_labels = [f"MT {m}" for m in block_keys]
         else:
             block_keys = cropped_block_info.get('legendre_coeffs', [])
             block_labels = [f"L={l}" for l in block_keys]
@@ -1858,7 +1936,12 @@ class HeatmapBuilder(PlotBuilder):
 
         # Setup block labels
         if self._heatmap_show_block_labels and energy_ranges:
-            x_axis_label = "MT Number" if isinstance(original_data, CovarianceHeatmapData) else "Legendre Order"
+            if is_multi_isotope:
+                x_axis_label = "Isotope-MT"
+            elif isinstance(original_data, CovarianceHeatmapData):
+                x_axis_label = "MT Number"
+            else:
+                x_axis_label = "Legendre Order"
 
             if is_off_diagonal:
                 # Off-diagonal: separate x and y labels
@@ -1896,11 +1979,15 @@ class HeatmapBuilder(PlotBuilder):
                 # Diagonal or multiblock: same labels on both axes
                 centers = []
                 labels = []
-                for key in block_keys:
+                for i, key in enumerate(block_keys):
                     rng = energy_ranges.get(key)
                     if rng:
                         centers.append((rng[0] + rng[1]) * 0.5)
-                        labels.append(str(key))
+                        # Use pre-built label if available, otherwise convert key to string
+                        if i < len(block_labels):
+                            labels.append(block_labels[i])
+                        else:
+                            labels.append(str(key))
 
                 if centers:
                     ax.set_xticks([])

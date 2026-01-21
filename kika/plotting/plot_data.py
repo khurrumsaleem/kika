@@ -520,32 +520,44 @@ class HeatmapPlotData:
 class CovarianceHeatmapData(HeatmapPlotData):
     """
     Covariance/correlation matrix heatmap data.
-    
+
     Additional Attributes
     ---------------------
     matrix_type : str
         'cov' or 'corr'
-    zaid : int, optional
-        Isotope identifier (ZAID)
+    zaid : int, List[int], or None
+        Isotope identifier(s). Single ZAID for single-isotope heatmaps,
+        list of ZAIDs for multi-isotope heatmaps.
     block_info : dict, optional
         Information about matrix block structure:
-        - 'mts': list of MT numbers
-        - 'G': number of energy groups per MT
-        - 'ranges': list of (start, end) indices for each MT block
+        - For single-isotope:
+            - 'mts': list of MT numbers
+            - 'G': number of energy groups per MT
+            - 'ranges': list of (start, end) indices for each MT block
+            - 'energy_ranges': dict mapping MT -> (start, end) coordinates
+        - For multi-isotope (when 'is_multi_isotope' is True):
+            - 'blocks': list of (zaid, mt) tuples
+            - 'zaids': list of ZAIDs
+            - 'mts': list of MT numbers
+            - 'G': number of energy groups per block
+            - 'ranges': dict mapping (zaid, mt) -> (start, end) indices
+            - 'energy_ranges': dict mapping (zaid, mt) -> (start, end) coordinates
+            - 'is_multi_isotope': True
     uncertainty_data : dict, optional
-        Uncertainty values for optional panels above heatmap
-        Format: {mt: sigma_percent_array} where sigma_percent_array has length G
+        Uncertainty values for optional panels above heatmap.
+        - For single-isotope: {mt: sigma_percent_array}
+        - For multi-isotope: {(zaid, mt): sigma_percent_array}
     energy_grid : np.ndarray, optional
         Energy bin boundaries (length G+1) for automatic energy tick display
     mt_labels : list of str, optional
-        Custom labels for MT reactions (defaults to "MT {number}")
+        Custom labels for blocks. For multi-isotope, typically "Symbol-MT#" format.
     is_diagonal : bool
         Whether this represents diagonal blocks (vs off-diagonal)
     """
     matrix_type: str = "corr"
-    zaid: Optional[int] = None
+    zaid: Optional[Union[int, List[int]]] = None
     block_info: Optional[Dict[str, Any]] = None
-    uncertainty_data: Optional[Dict[int, np.ndarray]] = None
+    uncertainty_data: Optional[Dict[Union[int, Tuple[int, int]], np.ndarray]] = None
     energy_grid: Optional[np.ndarray] = None
     mt_labels: Optional[List[str]] = None
     is_diagonal: bool = True

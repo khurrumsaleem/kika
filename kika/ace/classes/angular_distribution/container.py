@@ -16,6 +16,108 @@ from kika.ace.classes.angular_distribution.distributions.tabulated import Tabula
 from kika.ace.classes.angular_distribution.utils import Law44DataError
 
 
+# Constants for TOF energy resolution calculation
+_NEUTRON_MASS_MEV = 939.565  # neutron mass in MeV/c²
+_SPEED_OF_LIGHT_M_PER_NS = 0.299792458  # speed of light in m/ns (c = 3e8 m/s = 0.3 m/ns)
+
+# Default TOF parameters (GELINA facility)
+_DEFAULT_FLIGHT_PATH_M = 27.037  # meters
+_DEFAULT_DELTA_T_NS = 5.0  # nanoseconds
+
+
+def _compute_energy_resolution_tof(
+    energy_mev: float,
+    flight_path_m: float = _DEFAULT_FLIGHT_PATH_M,
+    delta_t_ns: float = _DEFAULT_DELTA_T_NS,
+) -> float:
+    """
+    Calculate TOF (Time-of-Flight) energy resolution σE in MeV.
+
+    In TOF experiments, neutron energy is determined by measuring time-of-flight.
+    This introduces energy uncertainty due to finite time resolution.
+
+    Energy resolution formula:
+        σE = E × 2 × δt / t
+    where t = L / v = L / (c × sqrt(2E/m_n))
+
+    Parameters
+    ----------
+    energy_mev : float
+        Neutron energy in MeV
+    flight_path_m : float, optional
+        Flight path distance in meters (default: 27.037 m, GELINA facility)
+    delta_t_ns : float, optional
+        Time resolution in nanoseconds (default: 5.0 ns)
+
+    Returns
+    -------
+    float
+        Energy resolution σE in MeV
+
+    Examples
+    --------
+    >>> _compute_energy_resolution_tof(1.0, 27.037, 5.0)  # ~0.0054 MeV
+    >>> _compute_energy_resolution_tof(10.0, 27.037, 5.0)  # ~0.17 MeV
+    """
+    # velocity = c × sqrt(2E/m_n) in m/ns
+    velocity_m_per_ns = _SPEED_OF_LIGHT_M_PER_NS * np.sqrt(2 * energy_mev / _NEUTRON_MASS_MEV)
+    # time of flight in ns
+    t_ns = flight_path_m / velocity_m_per_ns
+    # energy resolution: σE/E = 2 × δt/t
+    sigma_E = energy_mev * 2 * delta_t_ns / t_ns
+    return sigma_E
+
+
+def _get_xs_at_energy(ace, mt: int, energy: float) -> Optional[float]:
+    """
+    Get the cross-section value at a specific energy using linear interpolation.
+
+    Parameters
+    ----------
+    ace : Ace
+        ACE object containing cross-section data
+    mt : int
+        MT reaction number
+    energy : float
+        Energy in MeV
+
+    Returns
+    -------
+    float or None
+        Cross-section value in barns, or None if not available
+    """
+    if ace is None:
+        return None
+
+    # Handle standard reactions stored in esz_block
+    if mt == 1 and hasattr(ace, 'esz_block') and ace.esz_block and ace.esz_block.total_xs:
+        energies = [e.value for e in ace.esz_block.energies]
+        xs_values = [x.value for x in ace.esz_block.total_xs]
+    elif mt == 2 and hasattr(ace, 'esz_block') and ace.esz_block and ace.esz_block.elastic_xs:
+        energies = [e.value for e in ace.esz_block.energies]
+        xs_values = [x.value for x in ace.esz_block.elastic_xs]
+    elif mt == 101 and hasattr(ace, 'esz_block') and ace.esz_block and ace.esz_block.absorption_xs:
+        energies = [e.value for e in ace.esz_block.energies]
+        xs_values = [x.value for x in ace.esz_block.absorption_xs]
+    elif hasattr(ace, 'cross_section') and ace.cross_section and mt in ace.cross_section.reaction:
+        reaction = ace.cross_section.reaction[mt]
+        energies = reaction.energies
+        xs_values = reaction.xs_values
+    else:
+        return None
+
+    if not energies or not xs_values:
+        return None
+
+    # Linear interpolation
+    if energy <= energies[0]:
+        return xs_values[0]
+    elif energy >= energies[-1]:
+        return xs_values[-1]
+    else:
+        return float(np.interp(energy, energies, xs_values))
+
+
 @dataclass
 class AngularDistributionContainer:
     """Container for all angular distributions."""
@@ -214,12 +316,136 @@ class AngularDistributionContainer:
             
         return result
 
-    def to_dataframe(self, mt: int, energy: float, particle_type: str = 'neutron', 
-                    particle_idx: int = 0, ace=None, num_points: int = 100, 
-                    interpolate: bool = False) -> Optional[pd.DataFrame]:
+    def _apply_energy_folding(
+        self,
+        mt: int,
+        target_energy: float,
+        sigma_E: float,
+        ace,
+        particle_type: str,
+        particle_idx: int,
+        num_points: int,
+        normalize_to_xs: bool,
+        cross_section_unit: str,
+        n_sigma: float = 3.0,
+        n_samples: int = 21,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Apply Gaussian energy folding to angular distribution.
+
+        This method convolves the angular distribution with a Gaussian kernel
+        in energy space to account for TOF energy resolution.
+
+        Parameters
+        ----------
+        mt : int
+            MT reaction number
+        target_energy : float
+            Target energy in MeV around which to fold
+        sigma_E : float
+            Energy resolution (standard deviation) in MeV
+        ace : Ace
+            ACE object containing cross-section and distribution data
+        particle_type : str
+            Type of particle: 'neutron', 'photon', or 'particle'
+        particle_idx : int
+            Particle index for particle_type='particle'
+        num_points : int
+            Number of angular points to generate
+        normalize_to_xs : bool
+            If True, return differential cross-section instead of PDF
+        cross_section_unit : str
+            Unit for differential cross-section
+        n_sigma : float, optional
+            Number of sigma to extend folding window (default: 3.0)
+        n_samples : int, optional
+            Number of energy samples for numerical integration (default: 21)
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray]
+            (cosine, values) arrays with folded angular distribution
+        """
+        # Get ACE energy bounds
+        if hasattr(ace, 'esz_block') and ace.esz_block and ace.esz_block.energies:
+            e_min = ace.esz_block.energies[0].value
+            e_max = ace.esz_block.energies[-1].value
+        else:
+            # Fallback: use a reasonable range
+            e_min = 1e-11
+            e_max = 20.0
+
+        # Define energy window, clamped to ACE valid range
+        e_low = max(e_min, target_energy - n_sigma * sigma_E)
+        e_high = min(e_max, target_energy + n_sigma * sigma_E)
+
+        # Sample energies uniformly within the window
+        sample_energies = np.linspace(e_low, e_high, n_samples)
+
+        # Compute Gaussian weights
+        weights = np.exp(-0.5 * ((sample_energies - target_energy) / sigma_E) ** 2)
+        weights /= weights.sum()  # Normalize weights
+
+        # Initialize accumulators
+        cosine_grid = None
+        weighted_values = None
+
+        for i, sample_energy in enumerate(sample_energies):
+            # Get angular distribution at this energy (always interpolate for consistent grid)
+            try:
+                df = self.to_dataframe(
+                    mt=mt,
+                    energy=sample_energy,
+                    particle_type=particle_type,
+                    particle_idx=particle_idx,
+                    ace=ace,
+                    num_points=num_points,
+                    interpolate=True,
+                    normalize_to_xs=normalize_to_xs,
+                    cross_section_unit=cross_section_unit,
+                    energy_folding=False,  # Prevent recursion
+                )
+            except Exception:
+                # Skip this energy point if distribution is not available
+                continue
+
+            if df is None:
+                continue
+
+            # Extract values
+            cosines = df['cosine'].values
+            if 'dsigma_dOmega' in df.columns:
+                values = df['dsigma_dOmega'].values
+            elif 'dsigma_dmu' in df.columns:
+                values = df['dsigma_dmu'].values
+            else:
+                values = df['pdf'].values
+
+            # Initialize on first valid sample
+            if cosine_grid is None:
+                cosine_grid = cosines
+                weighted_values = np.zeros_like(values)
+
+            # Accumulate weighted values
+            weighted_values += weights[i] * values
+
+        if cosine_grid is None or weighted_values is None:
+            raise ValueError(
+                f"Could not compute energy-folded distribution for MT={mt} "
+                f"at energy={target_energy} MeV"
+            )
+
+        return cosine_grid, weighted_values
+
+    def to_dataframe(self, mt: int, energy: float, particle_type: str = 'neutron',
+                    particle_idx: int = 0, ace=None, num_points: int = 100,
+                    interpolate: bool = True, normalize_to_xs: bool = False,
+                    cross_section_unit: str = 'b',
+                    energy_folding: bool = False,
+                    tof: Tuple[float, float] = (27.037, 5.0)) -> Optional[pd.DataFrame]:
         """
         Convert an angular distribution to a pandas DataFrame.
-        
+
         Parameters
         ----------
         mt : int
@@ -231,18 +457,35 @@ class AngularDistributionContainer:
         particle_idx : int, optional
             Index of the particle type (used only for particle_type='particle')
         ace : Ace, optional
-            ACE object containing the distribution data (required for Kalbach-Mann)
+            ACE object containing the distribution data (required for Kalbach-Mann,
+            normalize_to_xs=True, and energy_folding=True)
         num_points : int, optional
             Number of angular points to generate when interpolating, defaults to 100
         interpolate : bool, optional
             Whether to interpolate onto a regular grid (True) or return original points (False)
-            
+        normalize_to_xs : bool, optional
+            If True, multiply PDF by the cross-section at the given energy to get
+            the differential cross-section. Requires ace parameter.
+            Default is False (returns normalized PDF).
+        cross_section_unit : str, optional
+            Unit for differential cross-section when normalize_to_xs=True:
+            - 'b' or 'barns': returns dsigma/dmu in barns (default)
+            - 'b/sr' or 'barns/sr': returns dsigma/dOmega in barns/steradian
+            The conversion is: dsigma/dOmega = dsigma/dmu / (2*pi)
+        energy_folding : bool, optional
+            If True, apply Gaussian energy folding to account for TOF energy resolution.
+            Requires ace parameter. Default is False.
+        tof : tuple of (float, float), optional
+            TOF parameters as (flight_path_m, delta_t_ns). Default is (27.037, 5.0)
+            corresponding to GELINA facility parameters.
+
         Returns
         -------
         pandas.DataFrame or None
-            DataFrame with 'energy', 'cosine', and 'pdf' columns
+            DataFrame with 'energy', 'cosine', and 'pdf' (or 'dsigma_dmu'/'dsigma_dOmega') columns.
+            If normalize_to_xs=True, 'pdf' column is replaced with differential cross-section values.
             Returns None if pandas is not available
-            
+
         Raises
         ------
         Law44DataError
@@ -250,11 +493,85 @@ class AngularDistributionContainer:
         KeyError
             If the MT number is not found in the distribution container
         ValueError
-            If the particle type is unknown
+            If the particle type is unknown, or if normalize_to_xs=True but ace is None,
+            or if energy_folding=True but ace is None
         """
+        # Validate cross_section_unit
+        valid_units = ('b', 'barns', 'b/sr', 'barns/sr')
+        if cross_section_unit not in valid_units:
+            raise ValueError(f"Invalid cross_section_unit '{cross_section_unit}'. "
+                           f"Valid options: {valid_units}")
+
+        # Handle energy folding if requested
+        if energy_folding:
+            if ace is None:
+                raise ValueError("ACE object required for energy folding. "
+                               "Pass ace=ace_object when calling to_dataframe().")
+
+            # Compute energy resolution using TOF parameters
+            flight_path_m, delta_t_ns = tof
+            sigma_E = _compute_energy_resolution_tof(energy, flight_path_m, delta_t_ns)
+
+            # Apply energy folding
+            cosine_grid, folded_values = self._apply_energy_folding(
+                mt=mt,
+                target_energy=energy,
+                sigma_E=sigma_E,
+                ace=ace,
+                particle_type=particle_type,
+                particle_idx=particle_idx,
+                num_points=num_points,
+                normalize_to_xs=normalize_to_xs,
+                cross_section_unit=cross_section_unit,
+            )
+
+            # Build DataFrame from folded data
+            df = pd.DataFrame({
+                'energy': energy,
+                'cosine': cosine_grid,
+            })
+
+            # Add appropriate value column based on cross_section_unit
+            if normalize_to_xs:
+                if cross_section_unit in ('b/sr', 'barns/sr'):
+                    df['dsigma_dOmega'] = folded_values
+                else:
+                    df['dsigma_dmu'] = folded_values
+            else:
+                df['pdf'] = folded_values
+
+            df['particle_type'] = particle_type
+            df['mt'] = mt
+            if particle_type == 'particle':
+                df['particle_idx'] = particle_idx
+
+            return df
+
         # Special case for elastic scattering (MT=2)
         if particle_type == 'neutron' and mt == 2 and self.elastic:
-            return self.elastic.to_dataframe(energy, num_points, interpolate)
+            df = self.elastic.to_dataframe(energy, num_points, interpolate)
+            if df is not None:
+                df['particle_type'] = particle_type
+                df['mt'] = mt
+                # Apply cross-section normalization if requested
+                if normalize_to_xs:
+                    if ace is None:
+                        raise ValueError("ACE object required for cross-section normalization. "
+                                       "Pass ace=ace_object when calling to_dataframe().")
+                    xs_value = _get_xs_at_energy(ace, mt, energy)
+                    if xs_value is not None and xs_value > 0:
+                        dsigma_dmu = df['pdf'] * xs_value
+                        # Convert to b/sr if requested
+                        if cross_section_unit in ('b/sr', 'barns/sr'):
+                            df['dsigma_dOmega'] = dsigma_dmu / (2 * np.pi)
+                        else:
+                            df['dsigma_dmu'] = dsigma_dmu
+                        df = df.drop(columns=['pdf'])
+                    else:
+                        import warnings
+                        warnings.warn(f"Could not get cross-section for MT={mt} at E={energy} MeV. "
+                                    "Returning normalized PDF instead.")
+            return df
         
         # Get the appropriate distribution container
         if particle_type == 'neutron':
@@ -288,18 +605,38 @@ class AngularDistributionContainer:
             df['mt'] = mt
             if particle_type == 'particle':
                 df['particle_idx'] = particle_idx
-            
+
+            # Apply cross-section normalization if requested
+            if normalize_to_xs:
+                if ace is None:
+                    raise ValueError("ACE object required for cross-section normalization. "
+                                   "Pass ace=ace_object when calling to_dataframe().")
+
+                xs_value = _get_xs_at_energy(ace, mt, energy)
+                if xs_value is not None and xs_value > 0:
+                    dsigma_dmu = df['pdf'] * xs_value
+                    # Convert to b/sr if requested
+                    if cross_section_unit in ('b/sr', 'barns/sr'):
+                        df['dsigma_dOmega'] = dsigma_dmu / (2 * np.pi)
+                    else:
+                        df['dsigma_dmu'] = dsigma_dmu
+                    df = df.drop(columns=['pdf'])
+                else:
+                    import warnings
+                    warnings.warn(f"Could not get cross-section for MT={mt} at E={energy} MeV. "
+                                "Returning normalized PDF instead.")
+
             return df
         return None
-    
+
     def to_plot_data(self, mt: int, energy: float, particle_type: str = 'neutron',
                     particle_idx: int = 0, ace=None, **kwargs):
         """
         Extract angular distribution plot data in a format compatible with PlotBuilder.
-        
+
         This method provides direct access to angular distribution data without going through
         the parent Ace object. It's equivalent to calling ace.to_plot_data('ang', mt=mt, energy=energy).
-        
+
         Parameters
         ----------
         mt : int
@@ -311,7 +648,7 @@ class AngularDistributionContainer:
         particle_idx : int, optional
             Particle index for particle_type='particle' (default: 0)
         ace : Ace, optional
-            ACE object (required for Kalbach-Mann distributions)
+            ACE object (required for Kalbach-Mann distributions and normalize_to_xs=True)
         **kwargs
             Additional parameters for styling and data extraction:
             - label (str): Custom label (default: auto-generated)
@@ -322,33 +659,62 @@ class AngularDistributionContainer:
             - markersize (float): Marker size
             - num_points (int): Number of angular points when interpolating (default: 100)
             - interpolate (bool): Whether to interpolate onto regular grid (default: False)
-            
+            - normalize_to_xs (bool): If True, return differential cross-section
+              instead of normalized PDF. Requires ace parameter. (default: False)
+            - cross_section_unit (str): Unit for differential cross-section when
+              normalize_to_xs=True. Options: 'b'/'barns' for dsigma/dmu, or
+              'b/sr'/'barns/sr' for dsigma/dOmega. (default: 'b')
+            - energy_folding (bool): If True, apply Gaussian energy folding to account
+              for TOF energy resolution. Requires ace parameter. (default: False)
+            - tof (tuple): TOF parameters as (flight_path_m, delta_t_ns).
+              (default: (27.037, 5.0) - GELINA facility parameters)
+
         Returns
         -------
         PlotData
             PlotData object compatible with PlotBuilder
-            
+
         Examples
         --------
         >>> ace = kika.read_ace('fe56.ace')
-        >>> 
+        >>>
         >>> # Direct access from angular_distributions object
         >>> ang_data = ace.angular_distributions.to_plot_data(mt=2, energy=5.0, label='5 MeV')
-        >>> 
+        >>>
         >>> # Use with PlotBuilder
         >>> from kika.plotting import PlotBuilder
         >>> fig = (PlotBuilder()
         ...        .add_data(ang_data)
         ...        .set_labels(x_label='cos(θ)', y_label='Probability Density')
         ...        .build())
+        >>>
+        >>> # Get differential cross-section in b/sr (for comparison with EXFOR)
+        >>> ang_xs = ace.angular_distributions.to_plot_data(
+        ...     mt=2, energy=5.0, ace=ace, normalize_to_xs=True,
+        ...     cross_section_unit='b/sr', label='5 MeV')
+        >>>
+        >>> # With energy folding (default TOF parameters from GELINA)
+        >>> ace_folded = ace.angular_distributions.to_plot_data(
+        ...     mt=2, energy=1.3, ace=ace, normalize_to_xs=True,
+        ...     cross_section_unit='b/sr', energy_folding=True, label='ACE (folded)')
+        >>>
+        >>> # With custom TOF parameters (e.g., ORELA facility)
+        >>> ace_orela = ace.angular_distributions.to_plot_data(
+        ...     mt=2, energy=1.3, ace=ace, normalize_to_xs=True,
+        ...     cross_section_unit='b/sr', energy_folding=True,
+        ...     tof=(40.0, 8.0), label='ACE (ORELA folding)')
         """
         from kika.plotting import PlotData
         import numpy as np
-        
+
         # Additional parameters for to_dataframe
         num_points = kwargs.pop('num_points', 100)
         interpolate = kwargs.pop('interpolate', False)
-        
+        normalize_to_xs = kwargs.pop('normalize_to_xs', False)
+        cross_section_unit = kwargs.pop('cross_section_unit', 'b')
+        energy_folding = kwargs.pop('energy_folding', False)
+        tof = kwargs.pop('tof', (27.037, 5.0))
+
         # Get the angular distribution data as a DataFrame
         df = self.to_dataframe(
             mt=mt,
@@ -357,25 +723,34 @@ class AngularDistributionContainer:
             particle_idx=particle_idx,
             ace=ace,
             num_points=num_points,
-            interpolate=interpolate
+            interpolate=interpolate,
+            normalize_to_xs=normalize_to_xs,
+            cross_section_unit=cross_section_unit,
+            energy_folding=energy_folding,
+            tof=tof
         )
-        
+
         if df is None:
             raise ValueError(f"Could not extract angular distribution for MT={mt} at energy={energy} MeV")
-        
-        # Extract cosine (mu) and pdf from the DataFrame
+
+        # Extract cosine (mu) and y values from the DataFrame
         mu = df['cosine'].values
-        pdf = df['pdf'].values
-        
+        if 'dsigma_dOmega' in df.columns:
+            y_values = df['dsigma_dOmega'].values
+        elif 'dsigma_dmu' in df.columns:
+            y_values = df['dsigma_dmu'].values
+        else:
+            y_values = df['pdf'].values
+
         # Get label
         label = kwargs.get('label', None)
         if label is None:
             # Create default label
             label = f"MT={mt} @ {energy} MeV"
-        
+
         return PlotData(
             x=np.array(mu),
-            y=np.array(pdf),
+            y=np.array(y_values),
             label=label,
             color=kwargs.get('color', None),
             linestyle=kwargs.get('linestyle', '-'),
@@ -384,201 +759,6 @@ class AngularDistributionContainer:
             markersize=kwargs.get('markersize', None),
             plot_type='line'
         )
-    
-    def plot(self, mt: int, energy: float, particle_type: str = 'neutron', 
-            particle_idx: int = 0, ace=None, ax=None, title=None, **kwargs) -> Optional[Tuple]:
-        """
-        Plot an angular distribution for a specific reaction and energy.
-        
-        Parameters
-        ----------
-        mt : int
-            MT number for the reaction
-        energy : float
-            Incident energy to evaluate the distribution at
-        particle_type : str, optional
-            Type of particle: 'neutron', 'photon', or 'particle'
-        particle_idx : int, optional
-            Index of the particle type (used only for particle_type='particle')
-        ace : Ace, optional
-            ACE object containing the distribution data (needed for Kalbach-Mann)
-        ax : matplotlib.axes.Axes, optional
-            Axes to plot on, if None a new figure is created
-        title : str, optional
-            Title for the plot, if None a default title is used
-        **kwargs : dict
-            Additional keyword arguments passed to the plot function
-            
-        Returns
-        -------
-        tuple or None
-            Tuple of (fig, ax) or None if matplotlib is not available
-        """
-        try:
-            import matplotlib.pyplot as plt
-            
-            # Get the data to plot
-            df = self.to_dataframe(mt, energy, particle_type, particle_idx, ace)
-            
-            # Create figure and axes if not provided
-            if ax is None:
-                fig, ax = plt.subplots(figsize=(8, 6))
-            else:
-                fig = ax.figure
-            
-            # Set default parameters if not specified
-            if 'linewidth' not in kwargs:
-                kwargs['linewidth'] = 2
-            if 'color' not in kwargs:
-                kwargs['color'] = 'blue'
-            
-            # Plot the data
-            ax.plot(df['cosine'], df['pdf'], **kwargs)
-            
-            # Set labels and title
-            ax.set_xlabel('Cosine (μ)')
-            ax.set_ylabel('Probability Density')
-            
-            if title is None:
-                title = f'Angular Distribution for MT={mt} at {energy:.4g} MeV ({particle_type})'
-            ax.set_title(title)
-            
-            # Set axis limits
-            ax.set_xlim(-1, 1)
-            
-            # Add grid
-            ax.grid(True, alpha=0.3)
-            
-            return fig, ax
-        except ImportError:
-            return None
-    
-    def plot_energy_comparison(self, mt: int, energies: List[float], particle_type: str = 'neutron',
-                              particle_idx: int = 0, ace=None, ax=None, title=None, 
-                              colors=None, labels=None, **kwargs) -> Optional[Tuple]:
-        """
-        Plot angular distributions for multiple energies for comparison.
-        
-        Parameters
-        ----------
-        mt : int
-            MT number for the reaction
-        energies : List[float]
-            List of incident energies to evaluate the distribution at
-        particle_type : str, optional
-            Type of particle: 'neutron', 'photon', or 'particle'
-        particle_idx : int, optional
-            Index of the particle type (used only for particle_type='particle')
-        ace : Ace, optional
-            ACE object containing the distribution data (required for Kalbach-Mann)
-        ax : matplotlib.axes.Axes, optional
-            Axes to plot on, if None a new figure is created
-        title : str, optional
-            Title for the plot, if None a default title is used
-        colors : List[str], optional
-            List of colors for each energy, if None, default colors are used
-        labels : List[str], optional
-            List of labels for each energy, if None, energies are used
-        **kwargs : dict
-            Additional keyword arguments passed to the plot function
-            
-        Returns
-        -------
-        tuple or None
-            Tuple of (fig, ax) or None if matplotlib is not available
-            
-        Raises
-        ------
-        Law44DataError
-            If trying to process a Kalbach-Mann distribution without providing ACE data
-        KeyError
-            If the MT number is not found in the distribution container
-        ValueError
-            If the particle type is unknown
-        """
-        try:
-            import matplotlib.pyplot as plt
-            
-            # Get the appropriate distribution container
-            if particle_type == 'neutron':
-                dist_container = self.incident_neutron
-            elif particle_type == 'photon':
-                dist_container = self.photon_production
-            elif particle_type == 'particle':
-                if particle_idx < 0 or particle_idx >= len(self.particle_production):
-                    raise ValueError(f"Particle index {particle_idx} out of bounds")
-                dist_container = self.particle_production[particle_idx]
-            else:
-                raise ValueError(f"Unknown particle type: {particle_type}")
-            
-            # Get the angular distribution for this MT number
-            if mt not in dist_container:
-                raise KeyError(f"MT={mt} not found in {particle_type} angular distributions")
-                
-            # Check if this is a Kalbach-Mann distribution that requires ACE data
-            distribution = dist_container[mt]
-            if isinstance(distribution, KalbachMannAngularDistribution) and ace is None:
-                raise Law44DataError(
-                    f"ACE object must be provided for Kalbach-Mann angular distribution (MT={mt})"
-                )
-            
-            # Create figure and axes if not provided
-            if ax is None:
-                fig, ax = plt.subplots(figsize=(10, 6))
-            else:
-                fig = ax.figure
-            
-            # Set default colors if not provided
-            if colors is None:
-                colors = plt.cm.viridis(np.linspace(0, 1, len(energies)))
-            
-            # Set default labels if not provided
-            if labels is None:
-                labels = [f"{e:.4g} MeV" for e in energies]
-            
-            # Plot for each energy
-            for i, energy in enumerate(energies):
-                # Get color and label for this energy
-                color = colors[i] if i < len(colors) else 'blue'
-                label = labels[i] if i < len(labels) else f"{energy:.4g} MeV"
-                
-                try:
-                    # Get data for this energy - may raise Law44DataError
-                    df = self.to_dataframe(mt, energy, particle_type, particle_idx, ace)
-                    
-                    # Plot data
-                    plot_kwargs = kwargs.copy()
-                    plot_kwargs['color'] = color
-                    plot_kwargs['label'] = label
-                    
-                    ax.plot(df['cosine'], df['pdf'], **plot_kwargs)
-                except Law44DataError as e:
-                    # Skip this energy if Law 44 data is missing and add a note to the label
-                    import warnings
-                    warnings.warn(f"Energy {energy} MeV skipped: {str(e)}")
-                    continue
-            
-            # Set labels and title
-            ax.set_xlabel('Cosine (μ)')
-            ax.set_ylabel('Probability Density')
-            
-            if title is None:
-                title = f'Angular Distribution for MT={mt} ({particle_type}) at Multiple Energies'
-            ax.set_title(title)
-            
-            # Set axis limits
-            ax.set_xlim(-1, 1)
-            
-            # Add grid and legend
-            ax.grid(True, alpha=0.3)
-            ax.legend()
-            
-            return fig, ax
-        except ImportError:
-            return None
-        except Law44DataError:
-            # Re-raise Law44DataError to be handled by the caller
-            raise
     
     def __repr__(self) -> str:
         """

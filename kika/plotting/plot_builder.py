@@ -1652,7 +1652,14 @@ class PlotBuilder:
                 # Extract error bar specific kwargs
                 yerr = plot_kwargs.pop('yerr', None)
                 xerr = plot_kwargs.pop('xerr', None)
-                self.ax.errorbar(data.x, data.y, yerr=yerr, xerr=xerr, **plot_kwargs)
+                # Also check metadata for yerr/xerr (used by EXFOR data)
+                if yerr is None and 'yerr' in data.metadata:
+                    yerr = data.metadata['yerr']
+                if xerr is None and 'xerr' in data.metadata:
+                    xerr = data.metadata['xerr']
+                # Get capsize from metadata if available
+                capsize = data.metadata.get('capsize', 2)
+                self.ax.errorbar(data.x, data.y, yerr=yerr, xerr=xerr, capsize=capsize, **plot_kwargs)
             
             else:
                 raise ValueError(f"Unknown plot_type: {data.plot_type}")

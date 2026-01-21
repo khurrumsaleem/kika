@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Union
 from kika.ace.classes.xss import XssEntry
 from kika.ace.classes.cross_section.cross_section_repr import reaction_xs_repr, xs_data_repr
-from kika._constants import MT_GROUPS
+from kika._constants import MT_GROUPS, MT_COMPOSITES, MT_COMPOSITE_ORDER
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -104,6 +104,7 @@ class CrossSectionData:
     """Container for all reaction cross sections from the SIG block."""
     reaction: Dict[int, ReactionCrossSection] = field(default_factory=dict)  # MT number -> cross section data
     energy_grid: Optional[List[XssEntry]] = None  # Store energy grid for convenience
+    _composite_cache: Dict[int, ReactionCrossSection] = field(default_factory=dict)  # Cache for computed composites
     
     def set_energy_grid(self, energy_grid: List[XssEntry]) -> None:
         """
@@ -175,24 +176,110 @@ class CrossSectionData:
     def has_data(self) -> bool:
         """Check if any reaction cross section data is available."""
         return len(self.reaction) > 0
-    
+
     @property
     def mt_numbers(self) -> List[int]:
         """Get a list of available MT numbers in ascending order."""
         return sorted(self.reaction.keys())
+
+    def clear_composite_cache(self) -> None:
+        """
+        Clear the composite reaction cache.
+
+        Call this method if the underlying reaction data changes and you need
+        to recompute composite reactions.
+        """
+        self._composite_cache.clear()
+
+    def get_composite_info(self, mt: int) -> dict:
+        """
+        Get information about a composite MT reaction.
+
+        Parameters
+        ----------
+        mt : int
+            MT reaction number to query
+
+        Returns
+        -------
+        dict
+            Dictionary with keys:
+            - is_composite: bool - True if MT is defined in MT_COMPOSITES
+            - description: str - Description of the composite (empty if not composite)
+            - components: list - List of component MTs (resolved, no @references)
+            - available_components: list - Components that exist in the data
+            - missing_components: list - Components not in the data
+            - can_compute: bool - True if at least one component exists
+            - is_complete: bool - True if all components exist
+        """
+        if mt not in MT_COMPOSITES:
+            return {
+                'is_composite': False,
+                'description': '',
+                'components': [],
+                'available_components': [],
+                'missing_components': [],
+                'can_compute': mt in self.reaction,
+                'is_complete': mt in self.reaction
+            }
+
+        components_def, description = MT_COMPOSITES[mt]
+
+        # Resolve all component MTs (including @references)
+        resolved_components = []
+        for comp in components_def:
+            if isinstance(comp, str) and comp.startswith('@'):
+                # Reference to another composite
+                ref_mt = int(comp[1:])
+                resolved_components.append(ref_mt)
+            elif isinstance(comp, range):
+                resolved_components.extend(list(comp))
+            else:
+                resolved_components.append(comp)
+
+        # Check which components are available
+        available = []
+        missing = []
+        for comp_mt in resolved_components:
+            # Check if it's directly available or is itself a computable composite
+            if comp_mt in self.reaction:
+                available.append(comp_mt)
+            elif comp_mt in MT_COMPOSITES:
+                # Recursively check if the composite can be computed
+                comp_info = self.get_composite_info(comp_mt)
+                if comp_info['can_compute']:
+                    available.append(comp_mt)
+                else:
+                    missing.append(comp_mt)
+            else:
+                missing.append(comp_mt)
+
+        return {
+            'is_composite': True,
+            'description': description,
+            'components': resolved_components,
+            'available_components': available,
+            'missing_components': missing,
+            'can_compute': len(available) > 0,
+            'is_complete': len(missing) == 0
+        }
     
     def _get_or_compute_reaction(self, mt: int) -> Optional[ReactionCrossSection]:
         """
-        Get a reaction by MT number, computing it from grouped reactions if necessary.
-        
-        If the requested MT is in MT_GROUPS and not directly available, this method
-        will compute it by summing the cross sections of all component reactions.
-        
+        Get a reaction by MT number, computing it from composite definitions if necessary.
+
+        This method uses MT_COMPOSITES for full dependency-aware computation of
+        composite reactions. It handles:
+        - Direct reactions (from self.reaction)
+        - Cached composite reactions (from self._composite_cache)
+        - Computing new composites using MT_COMPOSITE_ORDER for proper dependency order
+        - '@MT' references to other composites
+
         Parameters
         ----------
         mt : int
             MT reaction number
-            
+
         Returns
         -------
         ReactionCrossSection or None
@@ -201,63 +288,117 @@ class CrossSectionData:
         # If we have it directly, return it
         if mt in self.reaction:
             return self.reaction[mt]
-        
-        # Check if this is a grouped MT that we need to compute
-        for grouped_mt, mt_range in MT_GROUPS:
-            if mt == grouped_mt:
-                # Find all component MTs that exist in our data
-                component_mts = [comp_mt for comp_mt in mt_range if comp_mt in self.reaction]
-                
-                if not component_mts:
-                    # No component reactions available
-                    return None
-                
-                # Get the first component to use as a template
-                first_reaction = self.reaction[component_mts[0]]
-                
-                # All components should have the same energy grid
-                # We'll use the energy grid from the first component
-                energy_entries = first_reaction._energy_entries
-                num_energies = len(energy_entries)
-                
-                # Initialize sum array
-                xs_sum = np.zeros(num_energies)
-                
-                # Sum all component cross sections
-                for comp_mt in component_mts:
-                    comp_reaction = self.reaction[comp_mt]
-                    # Ensure same length
-                    comp_xs = comp_reaction.xs_values
-                    if len(comp_xs) == num_energies:
-                        xs_sum += np.array(comp_xs)
-                    else:
-                        # Handle different lengths by taking minimum
-                        min_len = min(len(comp_xs), num_energies)
-                        xs_sum[:min_len] += np.array(comp_xs[:min_len])
-                
-                # Create XssEntry objects for the summed cross sections
-                # We'll create mock XssEntry objects with the summed values
-                xs_entries = []
-                for i, xs_val in enumerate(xs_sum):
-                    # Create a simple object that has a 'value' attribute
-                    class XssValue:
-                        def __init__(self, val):
-                            self.value = val
-                    xs_entries.append(XssValue(xs_val))
-                
-                # Create and return the aggregated reaction
-                aggregated_reaction = ReactionCrossSection(
-                    mt=mt,
-                    energy_idx=first_reaction.energy_idx,
-                    num_energies=num_energies,
-                    _xs_entries=xs_entries,
-                    _energy_entries=energy_entries
-                )
-                
-                return aggregated_reaction
-        
-        # MT not found and not a grouped MT
-        return None
+
+        # Check the composite cache
+        if mt in self._composite_cache:
+            return self._composite_cache[mt]
+
+        # Check if this is a composite MT that we can compute
+        if mt not in MT_COMPOSITES:
+            return None
+
+        # Ensure dependencies are computed first by processing in order
+        for order_mt in MT_COMPOSITE_ORDER:
+            if order_mt == mt:
+                break
+            # Compute dependencies if needed (recursive call handles caching)
+            if order_mt in MT_COMPOSITES and order_mt not in self.reaction and order_mt not in self._composite_cache:
+                self._get_or_compute_reaction(order_mt)
+
+        # Now compute this composite
+        result = self._compute_composite(mt)
+        if result is not None:
+            self._composite_cache[mt] = result
+
+        return result
+
+    def _compute_composite(self, mt: int) -> Optional[ReactionCrossSection]:
+        """
+        Compute a composite reaction by summing its components.
+
+        Parameters
+        ----------
+        mt : int
+            MT reaction number (must be in MT_COMPOSITES)
+
+        Returns
+        -------
+        ReactionCrossSection or None
+            The computed composite reaction, or None if no components available
+        """
+        if mt not in MT_COMPOSITES:
+            return None
+
+        components_def, _ = MT_COMPOSITES[mt]
+
+        # Collect all component reactions
+        component_reactions: List[ReactionCrossSection] = []
+
+        for comp in components_def:
+            if isinstance(comp, str) and comp.startswith('@'):
+                # Reference to another composite
+                ref_mt = int(comp[1:])
+                ref_reaction = self._get_or_compute_reaction(ref_mt)
+                if ref_reaction is not None:
+                    component_reactions.append(ref_reaction)
+            elif isinstance(comp, range):
+                # Range of MTs - add all that exist
+                for range_mt in comp:
+                    if range_mt in self.reaction:
+                        component_reactions.append(self.reaction[range_mt])
+            else:
+                # Single MT number
+                comp_mt = int(comp)
+                if comp_mt in self.reaction:
+                    component_reactions.append(self.reaction[comp_mt])
+                elif comp_mt in self._composite_cache:
+                    component_reactions.append(self._composite_cache[comp_mt])
+
+        if not component_reactions:
+            return None
+
+        # Use the full energy grid if available, otherwise use first component's grid
+        if self.energy_grid is not None:
+            energy_entries = self.energy_grid
+            num_energies = len(energy_entries)
+        else:
+            energy_entries = component_reactions[0]._energy_entries
+            num_energies = len(energy_entries)
+
+        # Initialize sum array for full energy grid
+        xs_sum = np.zeros(num_energies)
+
+        # Sum all component cross sections, respecting their energy indices
+        for comp_reaction in component_reactions:
+            comp_xs = comp_reaction.xs_values
+            start_idx = comp_reaction.energy_idx
+            end_idx = start_idx + len(comp_xs)
+
+            # Clamp to valid range
+            if start_idx < 0:
+                start_idx = 0
+            if end_idx > num_energies:
+                end_idx = num_energies
+
+            actual_len = end_idx - start_idx
+            if actual_len > 0 and actual_len <= len(comp_xs):
+                xs_sum[start_idx:end_idx] += np.array(comp_xs[:actual_len])
+
+        # Create XssEntry-like objects for the summed cross sections
+        class XssValue:
+            def __init__(self, val):
+                self.value = val
+
+        xs_entries = [XssValue(val) for val in xs_sum]
+
+        # Create and return the computed reaction
+        return ReactionCrossSection(
+            mt=mt,
+            energy_idx=0,  # Computed composite covers full energy grid
+            num_energies=num_energies,
+            _xs_entries=xs_entries,
+            _energy_entries=energy_entries
+        )
     
     def plot(self, mt: Union[int, List[int]], ax=None, **kwargs):
         """
