@@ -91,3 +91,84 @@ DB_FAMILY_MAPPINGS = {
 
 # Database quantity codes for angular distributions
 DB_DA_QUANTITIES = ["DA", "DA,,RTH", "DA/DA", "DA/DE"]
+
+# =============================================================================
+# EXFOR Quantity Codes and Descriptions
+# =============================================================================
+
+# EXFOR database quantity codes (used in quant1 column) to descriptions
+# These are the category codes used for filtering in the X4Pro database
+EXFOR_QUANTITY_CODES = {
+    # Cross section data
+    "CS": "Cross section data",
+    "CSP": "Partial cross section data",
+    "CST": "Temperature dependent cross section data",
+
+    # Differential data
+    "DA": "Differential data with respect to angle",
+    "DAE": "Differential data with respect to angle and energy",
+    "DAP": "Partial differential data with respect to angle",
+    "DE": "Differential data with respect to energy",
+    "DEP": "Partial differential data with respect to energy",
+
+    # Fission data
+    "FY": "Fission product yields",
+    "E": "Fission fragment energies",
+    "MFQ": "Miscellaneous fission quantities",
+
+    # Product yields
+    "PY": "Product yields",
+    "TT": "Thick target yields",
+    "TTD": "Differential thick target yields",
+    "TTP": "Partial thick target yields",
+
+    # Other quantities
+    "COR": "Secondary particle correlations",
+    "L": "Scattering amplitudes",
+    "NQ": "Nuclear quantities",
+    "POL": "Polarization data",
+    "RI": "Resonance integrals",
+    "RP": "Resonance parameters",
+    "RR": "Reaction rates",
+    "SP": "Gamma spectra",
+}
+
+# Wildcard/combined quantity codes (match multiple types)
+EXFOR_QUANTITY_WILDCARDS = {
+    "CS*": "Cross section data (all types: CS, CSP, CST)",
+    "DA*": "Differential data (all types: DA, DAE, DAP)",
+    "TT*": "Thick target yields (all types: TT, TTD, TTP)",
+}
+
+# EXFOR URL base for linking to IAEA database
+EXFOR_URL_BASE = "https://www-nds.iaea.org/exfor/"
+
+# Quantity families for grouping related types
+QUANTITY_FAMILIES = {
+    "cross_section": ["CS", "CSP", "CST"],
+    "angular": ["DA", "DAE", "DAP"],
+    "energy_spectrum": ["DE", "DEP"],
+    "fission": ["FY", "E", "MFQ"],
+    "product_yields": ["PY", "TT", "TTD", "TTP"],
+    "resonance": ["RI", "RP"],
+    "polarization": ["POL"],
+    "other": ["COR", "L", "NQ", "RR", "SP"],
+}
+
+# Family code to variable name mapping (for general data parsing)
+EXFOR_FAMILY_TO_VARIABLE = {
+    "EN": "energy",
+    "E": "energy",
+    "EN-CM": "energy_cm",
+    "ANG": "angle",
+    "ANG-CM": "angle_cm",
+    "COS": "cosine",
+    "COS-CM": "cosine_cm",
+    "E2": "secondary_energy",
+    "LVL": "level",
+    "HL": "half_life",
+    "MASS": "mass",
+    "ZAM": "product_zam",
+    "ELEM": "element",
+    "ISOMER": "isomer",
+}

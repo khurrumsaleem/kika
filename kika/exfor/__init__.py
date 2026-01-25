@@ -43,10 +43,20 @@ Legacy API:
 # Configuration (call configure() to set defaults for the session)
 from kika.exfor.config import configure, get_config
 
+# Constants
+from kika.exfor._constants import (
+    EXFOR_QUANTITY_CODES,
+    EXFOR_QUANTITY_WILDCARDS,
+    EXFOR_URL_BASE,
+    QUANTITY_FAMILIES,
+)
+
 # Primary API - Main exports
 from kika.exfor.io import read_exfor, read_all_exfor
 from kika.exfor.exfor_entry import ExforEntry
 from kika.exfor.angular_distribution import ExforAngularDistribution
+from kika.exfor.cross_section import ExforCrossSection
+from kika.exfor.experiment import ExforExperiment
 
 # Database API
 from kika.exfor.database import (
@@ -97,11 +107,18 @@ __all__ = [
     # Configuration
     "configure",
     "get_config",
+    # Constants
+    "EXFOR_QUANTITY_CODES",
+    "EXFOR_QUANTITY_WILDCARDS",
+    "EXFOR_URL_BASE",
+    "QUANTITY_FAMILIES",
     # Primary API
     "read_exfor",
     "read_all_exfor",
     "ExforEntry",
     "ExforAngularDistribution",
+    "ExforCrossSection",
+    "ExforExperiment",
     # Database API
     "X4ProDatabase",
     "X4ProDataset",

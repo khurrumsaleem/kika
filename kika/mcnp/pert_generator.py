@@ -2,8 +2,8 @@ import os
 import re
 from typing import Optional, Union
 from .parse_input import read_mcnp
-from .parse_materials import read_material
-from .material import Material, MaterialCollection
+from kika.materials.parse_mcnp import read_material
+from kika.materials import Material, MaterialCollection
 from kika._constants import MCNPY_HEADER, MCNPY_FOOTER, ATOMIC_MASS, N_AVOGADRO
 
 
@@ -567,14 +567,14 @@ def generate_PERTcards(inputfile, cell, reactions, material, energies=None, dens
     return
 
 
-def _format_mcnp_line(line, max_length=80):
+def _format_mcnp_line(line, max_length=120):
     """Helper function to format MCNP input lines to stay under the character limit.
-    
+
     :param line: The full line to format
     :type line: str
-    :param max_length: Maximum line length (default: 80)
+    :param max_length: Maximum line length (default: 120 for MCNP6)
     :type max_length: int
-    
+
     :return: Formatted string with proper line breaks
     :rtype: str
     """

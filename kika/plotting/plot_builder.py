@@ -1580,14 +1580,28 @@ class PlotBuilder:
             if 'color' not in plot_kwargs and default_colors is not None:
                 plot_kwargs['color'] = default_colors[i % len(default_colors)]
             
-            # Plot based on plot_type
-            if data.plot_type == 'line':
+            # Determine effective plot type - drawstyle can override plot_type
+            # This allows frontend to specify step plots via drawstyle parameter
+            effective_plot_type = data.plot_type
+            step_where = getattr(data, 'step_where', 'post')  # default step direction
+            
+            if data.drawstyle is not None and 'steps' in data.drawstyle:
+                effective_plot_type = 'step'
+                # Extract step direction from drawstyle (steps-pre, steps-post, steps-mid)
+                if 'pre' in data.drawstyle:
+                    step_where = 'pre'
+                elif 'mid' in data.drawstyle:
+                    step_where = 'mid'
+                else:
+                    step_where = 'post'
+            
+            # Plot based on effective plot_type
+            if effective_plot_type == 'line':
                 self.ax.plot(data.x, data.y, **plot_kwargs)
             
-            elif data.plot_type == 'step':
+            elif effective_plot_type == 'step':
                 # Handle step plots (common for uncertainties and multigroup data)
-                # Use 'post' where parameter to match the old plotting method
-                where = getattr(data, 'step_where', 'post')
+                # step_where was already computed above from drawstyle or data.step_where
                 
                 # Check if markers are requested
                 marker = plot_kwargs.get('marker', None)
@@ -1603,21 +1617,21 @@ class PlotBuilder:
                     
                     # Plot step line without marker
                     marker_backup = plot_kwargs.pop('marker')
-                    self.ax.step(data.x, data.y, where=where, **plot_kwargs)
+                    self.ax.step(data.x, data.y, where=step_where, **plot_kwargs)
                     
                     # Calculate midpoints for markers
                     # For 'post' step: each segment spans from x[i] to x[i+1] at height y[i]
                     # For 'pre' step: each segment spans from x[i-1] to x[i] at height y[i]
                     # For 'mid' step: segments are centered at x[i]
                     
-                    if where == 'post' and len(data.x) > 1:
+                    if step_where == 'post' and len(data.x) > 1:
                         # Midpoints between consecutive x values
                         x_mid = (data.x[:-1] + data.x[1:]) / 2
                         y_mid = data.y[:-1]  # Heights correspond to the left point
-                    elif where == 'pre' and len(data.x) > 1:
+                    elif step_where == 'pre' and len(data.x) > 1:
                         x_mid = (data.x[:-1] + data.x[1:]) / 2
                         y_mid = data.y[1:]  # Heights correspond to the right point
-                    elif where == 'mid':
+                    elif step_where == 'mid':
                         x_mid = data.x
                         y_mid = data.y
                     else:
@@ -1640,7 +1654,7 @@ class PlotBuilder:
                     self.ax.plot(x_mid, y_mid, **marker_kwargs)
                 else:
                     # No markers, just plot the step normally
-                    self.ax.step(data.x, data.y, where=where, **plot_kwargs)
+                    self.ax.step(data.x, data.y, where=step_where, **plot_kwargs)
             
             elif data.plot_type == 'scatter':
                 # Convert markersize to s for scatter plots

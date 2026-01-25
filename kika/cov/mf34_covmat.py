@@ -314,7 +314,7 @@ class MF34CovMat:
         Gmap = {t: len(unions[t]) - 1 for t in param_triplets}
         max_G = max(Gmap.values()) if Gmap else 0
         N = len(param_triplets) * max_G
-        full = np.zeros((N, N), dtype=float)
+        full = np.full((N, N), np.nan, dtype=float)
 
         for ir, rr, lr, ic, rc, lc, matrix, grid in zip(
             self.isotope_rows, self.reaction_rows, self.l_rows,
@@ -584,12 +584,22 @@ class MF34CovMat:
         max_G = max(G_map.values()) if G_map else 0
 
         # 4. Extract matrix with applied energy cropping
+        # Always get correlation matrix to use its NaN mask for identifying "no-data" regions
+        corr_matrix_all = filtered_mf34.clipped_correlation_matrix
+        
         if matrix_type_normalized == 'corr':
-            matrix_full_all = filtered_mf34.clipped_correlation_matrix
+            matrix_full_all = corr_matrix_all
             mask_value = 0.0
         else:  # 'cov'
-            matrix_full_all = filtered_mf34.covariance_matrix
-            mask_value = None
+            cov_matrix_all = filtered_mf34.covariance_matrix
+            # Apply NaN mask from correlation matrix to covariance matrix
+            # Where correlation is NaN (no data), covariance should also be NaN
+            cov_matrix_all = cov_matrix_all.copy()
+            cov_matrix_all[~np.isfinite(corr_matrix_all)] = np.nan
+            matrix_full_all = cov_matrix_all
+            # Use mask_value=0.0 for covariance too: zero covariance in off-diagonal
+            # regions indicates no data from the lifting operation
+            mask_value = 0.0
 
         # 5. Select rows/cols for requested Legendre coefficients
         energy_grids_dict: Dict[int, np.ndarray] = {}
@@ -708,13 +718,14 @@ class MF34CovMat:
 
         # 6. Generate label
         isotope_symbol = zaid_to_symbol(isotope)
+        matrix_type_label = "Covariance" if matrix_type_normalized == "cov" else "Correlation"
         if is_diagonal:
             if len(legendre_list) == 1:
-                label = f"{isotope_symbol} MT:{mt} L={legendre_list[0]} Correlation"
+                label = f"{isotope_symbol} MT:{mt} L={legendre_list[0]} {matrix_type_label}"
             else:
-                label = f"{isotope_symbol} MT:{mt} Angular Distribution Correlation"
+                label = f"{isotope_symbol} MT:{mt} Angular Distribution {matrix_type_label}"
         else:
-            label = f"{isotope_symbol} MT:{mt} L={legendre_list[0]} vs L={legendre_list[1]} Correlation"
+            label = f"{isotope_symbol} MT:{mt} L={legendre_list[0]} vs L={legendre_list[1]} {matrix_type_label}"
         
         # 7. Create and return MF34HeatmapData
         heatmap_data = MF34HeatmapData(

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from .material import MaterialCollection
+from kika.materials import MaterialCollection
 from .perturbations import Perturbation
 from kika.energy_grids.utils import _identify_energy_grid
 

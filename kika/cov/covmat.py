@@ -233,7 +233,7 @@ class CovMat:
 
         G = self.num_groups
         N = len(param_pairs) * G
-        full = np.zeros((N, N), dtype=float)
+        full = np.full((N, N), np.nan, dtype=float)
 
         for ir, rr, ic, rc, M in zip(
             self.isotope_rows,
@@ -1303,7 +1303,39 @@ class CovMat:
         else:  # 'cov'
             M_full = iso_cov.covariance_matrix[np.ix_(rows, cols)]
             mask_value = None
-        
+
+        # For covariance matrices, mark zero-variance regions as NaN
+        # so they render as grey (same as correlation matrices)
+        if matrix_type_normalized == 'cov':
+            if is_diagonal:
+                diag_var = np.diag(M_full)
+                std = np.sqrt(np.abs(diag_var))
+                # Use threshold to catch near-zero variances (floating-point tolerance)
+                max_std = np.nanmax(std) if np.any(np.isfinite(std)) else 1.0
+                threshold = max_std * 1e-12 if max_std > 0 else 1e-30
+                invalid_mask = ~np.isfinite(std) | (std < threshold)
+                if np.any(invalid_mask):
+                    M_full = M_full.copy()
+                    M_full[invalid_mask, :] = np.nan
+                    M_full[:, invalid_mask] = np.nan
+            else:
+                # Off-diagonal: get variances from the full covariance matrix
+                full_cov = iso_cov.covariance_matrix
+                row_var = np.diag(full_cov)[rows]
+                col_var = np.diag(full_cov)[cols]
+                row_std = np.sqrt(np.abs(row_var))
+                col_std = np.sqrt(np.abs(col_var))
+                # Use threshold to catch near-zero variances (floating-point tolerance)
+                all_std = np.concatenate([row_std[np.isfinite(row_std)], col_std[np.isfinite(col_std)]])
+                max_std = np.nanmax(all_std) if len(all_std) > 0 else 1.0
+                threshold = max_std * 1e-12 if max_std > 0 else 1e-30
+                row_invalid = ~np.isfinite(row_std) | (row_std < threshold)
+                col_invalid = ~np.isfinite(col_std) | (col_std < threshold)
+                if np.any(row_invalid) or np.any(col_invalid):
+                    M_full = M_full.copy()
+                    M_full[row_invalid, :] = np.nan
+                    M_full[:, col_invalid] = np.nan
+
         # 4. Prepare geometry and block_info
         transformed_edges = _transform_edges(edges_cropped)
         width = transformed_edges[-1] - transformed_edges[0]
@@ -1375,13 +1407,14 @@ class CovMat:
         # 7. Generate label
         from kika._utils import zaid_to_symbol
         isotope_symbol = zaid_to_symbol(zaid)
+        matrix_type_label = "Covariance" if matrix_type_normalized == 'cov' else "Correlation"
         if is_diagonal:
             if len(mts) == 1:
-                label = f"{isotope_symbol} MT:{mts[0]} Correlation"
+                label = f"{isotope_symbol} MT:{mts[0]} {matrix_type_label}"
             else:
-                label = f"{isotope_symbol} Correlation Matrix"
+                label = f"{isotope_symbol} {matrix_type_label} Matrix"
         else:
-            label = f"{isotope_symbol} MT:{mts[0]} vs MT:{mts[1]} Correlation"
+            label = f"{isotope_symbol} MT:{mts[0]} vs MT:{mts[1]} {matrix_type_label}"
         
         # 8. Create and return CovarianceHeatmapData
         heatmap_data = CovarianceHeatmapData(

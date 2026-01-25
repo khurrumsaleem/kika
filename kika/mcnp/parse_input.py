@@ -1,7 +1,7 @@
 from .input import Input
 from .perturbations import Perturbation, Pert
-from .material import Material, MaterialCollection
-from .parse_materials import read_material
+from kika.materials import Material, MaterialCollection
+from kika.materials.parse_mcnp import read_material
 import re
 
 def _read_PERT(lines, start_index):

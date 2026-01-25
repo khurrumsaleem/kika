@@ -198,7 +198,7 @@ class HeatmapBuilder(PlotBuilder):
             block_info = getattr(heatmap_data, 'block_info', None) or {}
             mts = block_info.get('mts', [])
             G = block_info.get('G', len(energy_grid) - 1)
-            is_multi_block = len(mts) > 1
+            is_multi_block = len(mts) > 1 and heatmap_data.is_diagonal
 
             # Find which groups are in range
             groups_idx, start_g, end_g = _find_groups_in_range(energy_grid)
@@ -286,9 +286,11 @@ class HeatmapBuilder(PlotBuilder):
                     else:
                         cropped_uncertainty[key] = sigma
 
-            # Reapply mask to cropped matrix
+            # Reapply mask to cropped matrix (NaN values + mask_value if set)
+            nan_mask = ~np.isfinite(cropped_M)
             if mask_value is not None:
-                cropped_M = np.ma.masked_where(cropped_M == mask_value, cropped_M)
+                nan_mask = nan_mask | (cropped_M == mask_value)
+            cropped_M = np.ma.masked_where(nan_mask, cropped_M)
 
             return cropped_M, new_x_edges, new_y_edges, new_block_info, cropped_energy_grid, cropped_uncertainty
 
@@ -431,9 +433,11 @@ class HeatmapBuilder(PlotBuilder):
                     'groups_idx_per_L': new_groups_idx_per_L,
                 }
 
-                # Reapply mask to cropped matrix (multi-block diagonal)
+                # Reapply mask to cropped matrix (multi-block diagonal) - NaN + mask_value
+                nan_mask = ~np.isfinite(cropped_M)
                 if mask_value is not None:
-                    cropped_M = np.ma.masked_where(cropped_M == mask_value, cropped_M)
+                    nan_mask = nan_mask | (cropped_M == mask_value)
+                cropped_M = np.ma.masked_where(nan_mask, cropped_M)
             elif not heatmap_data.is_diagonal:
                 # Off-diagonal block: L1 vs L2 with potentially different energy grids
                 # Extract row and column Legendre coefficients
@@ -533,9 +537,11 @@ class HeatmapBuilder(PlotBuilder):
                         else:
                             cropped_uncertainty[key] = sigma
 
-            # Reapply mask to cropped matrix (MF34 single-block or after multi-block diagonal)
+            # Reapply mask to cropped matrix (MF34 single-block or after multi-block diagonal) - NaN + mask_value
+            nan_mask = ~np.isfinite(cropped_M)
             if mask_value is not None:
-                cropped_M = np.ma.masked_where(cropped_M == mask_value, cropped_M)
+                nan_mask = nan_mask | (cropped_M == mask_value)
+            cropped_M = np.ma.masked_where(nan_mask, cropped_M)
 
             return cropped_M, new_x_edges, new_y_edges, new_block_info, cropped_energy_grid, cropped_uncertainty
 
@@ -1326,6 +1332,31 @@ class HeatmapBuilder(PlotBuilder):
             elif not self._heatmap_show_block_labels:
                 ax.set_xticks([])
                 ax.set_yticks([])
+        else:
+            # Off-diagonal block: different MTs on each axis
+            # For off-diagonal, use the full axis limits for label positioning
+            # since both row and column span the same energy range
+            ax.set_xticks([])
+            ax.set_yticks([])
+            
+            if self._heatmap_show_block_labels and len(mts) >= 2:
+                row_mt = mts[0]
+                col_mt = mts[1]
+                
+                # Use full axis limits for label positioning
+                x_center = (full_xlim[0] + full_xlim[1]) * 0.5
+                y_center = (full_ylim[0] + full_ylim[1]) * 0.5
+                
+                pending_block_labels = {
+                    'x_centers': [x_center],
+                    'x_labels': [str(col_mt)],
+                    'y_centers': [y_center],
+                    'y_labels': [str(row_mt)],
+                    'full_xlim': full_xlim,
+                    'full_ylim': full_ylim,
+                    'x_axis_label': "MT Number",
+                    'y_axis_label': "MT Number"
+                }
 
         # Energy ticks on secondary axes
         if self._heatmap_show_energy_ticks and data.energy_grid is not None and len(data.energy_grid) > 0:
@@ -1920,19 +1951,29 @@ class HeatmapBuilder(PlotBuilder):
                     block_labels = [f"{zaid_to_symbol(z)}-MT{m}" for (z, m) in block_keys]
             else:
                 block_keys = cropped_block_info.get('mts', [])
-                block_labels = [f"MT {m}" for m in block_keys]
+                # Use original mt_labels if available (just numbers, no "MT" prefix)
+                if original_data.mt_labels and len(original_data.mt_labels) == len(block_keys):
+                    block_labels = original_data.mt_labels
+                else:
+                    block_labels = [str(m) for m in block_keys]
         else:
             block_keys = cropped_block_info.get('legendre_coeffs', [])
             block_labels = [f"L={l}" for l in block_keys]
 
         pending_block_labels = None
 
-        # Check if this is an off-diagonal MF34 case (2 different L values)
-        is_off_diagonal = (
+        # Check if this is an off-diagonal case (2 different values, not diagonal)
+        is_off_diagonal_mf34 = (
             not isinstance(original_data, CovarianceHeatmapData) and
             not getattr(original_data, 'is_diagonal', True) and
             len(block_keys) == 2
         )
+        is_off_diagonal_covmat = (
+            isinstance(original_data, CovarianceHeatmapData) and
+            not getattr(original_data, 'is_diagonal', True) and
+            len(block_keys) == 2
+        )
+        is_off_diagonal = is_off_diagonal_mf34 or is_off_diagonal_covmat
 
         # Setup block labels
         if self._heatmap_show_block_labels and energy_ranges:

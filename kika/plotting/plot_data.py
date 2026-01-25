@@ -40,6 +40,11 @@ class PlotData:
         Transparency (0-1)
     plot_type : str
         Type of plot: 'line', 'step', 'scatter', 'errorbar'
+    drawstyle : str, optional
+        Matplotlib drawstyle for line plots. If set to 'steps-pre', 'steps-post',
+        or 'steps-mid', the plot will use step rendering even if plot_type is 'line'.
+        This provides an alternative way to specify step plots that integrates with
+        frontend plotting libraries (e.g., Plotly's line_shape parameter).
     metadata : dict
         Additional metadata about the data (e.g., isotope, MT, order)
     """
@@ -53,6 +58,7 @@ class PlotData:
     markersize: Optional[float] = None
     alpha: Optional[float] = None
     plot_type: str = 'line'
+    drawstyle: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     def __post_init__(self):
@@ -212,7 +218,7 @@ class LegendreUncertaintyPlotData(PlotData):
 class AngularDistributionPlotData(PlotData):
     """
     Plottable data for angular distributions.
-    
+
     Additional Attributes
     ---------------------
     energy : float
@@ -228,7 +234,7 @@ class AngularDistributionPlotData(PlotData):
     isotope: Optional[str] = None
     mt: Optional[int] = None
     distribution_type: Optional[str] = None
-    
+
     def __post_init__(self):
         super().__post_init__()
         # Store metadata
@@ -236,10 +242,49 @@ class AngularDistributionPlotData(PlotData):
         self.metadata['isotope'] = self.isotope
         self.metadata['mt'] = self.mt
         self.metadata['distribution_type'] = self.distribution_type
-        
+
         # Default label if not provided
         if self.label is None and self.energy is not None:
             self.label = f"E = {self.energy:.2e} MeV"
+
+
+@dataclass
+class CrossSectionPlotData(PlotData):
+    """
+    Plottable data for cross sections (energy-dependent).
+
+    This class represents cross section data as a function of energy,
+    typically from EXFOR experimental data or ENDF evaluations.
+
+    Additional Attributes
+    ---------------------
+    isotope : str, optional
+        Isotope identifier (e.g., 'Fe56')
+    mt : int, optional
+        MT reaction number (e.g., 1 for total, 2 for elastic)
+    energy_range : Tuple[float, float], optional
+        (min, max) energy range for this data in MeV
+    data_source : str, optional
+        Source of data: 'exfor', 'endf', 'ace', etc.
+    """
+    isotope: Optional[str] = None
+    mt: Optional[int] = None
+    energy_range: Optional[Tuple[float, float]] = None
+    data_source: Optional[str] = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Store metadata
+        self.metadata['isotope'] = self.isotope
+        self.metadata['mt'] = self.mt
+        self.metadata['energy_range'] = self.energy_range
+        self.metadata['data_source'] = self.data_source
+
+        # Default label if not provided
+        if self.label is None and self.isotope and self.mt is not None:
+            self.label = f"{self.isotope} MT={self.mt}"
+        elif self.label is None and self.mt is not None:
+            self.label = f"MT={self.mt}"
 
 
 class UncertaintyBand:
@@ -504,16 +549,18 @@ class HeatmapPlotData:
     
     def get_masked_data(self) -> np.ndarray:
         """
-        Get masked array with mask_value applied.
-        
+        Get masked array with mask_value and NaN values masked.
+
         Returns
         -------
         np.ma.MaskedArray
-            Masked version of data
+            Masked version of data where NaN values and mask_value (if set) are masked
         """
+        # Always mask NaN values so they render as grey via set_bad()
+        mask = ~np.isfinite(self.matrix_data)
         if self.mask_value is not None:
-            return np.ma.masked_where(self.matrix_data == self.mask_value, self.matrix_data)
-        return self.matrix_data
+            mask = mask | (self.matrix_data == self.mask_value)
+        return np.ma.masked_where(mask, self.matrix_data)
 
 
 @dataclass
@@ -569,12 +616,41 @@ class CovarianceHeatmapData(HeatmapPlotData):
         # Auto-configure for correlation matrices with diverging colormap
         if self.matrix_type == "corr" and self.norm is None:
             from matplotlib.colors import TwoSlopeNorm
-            # Calculate symmetric color limits around 0
-            absmax = np.nanmax(np.abs(self.matrix_data))
+            # Use masked data to exclude mask_value from absmax calculation
+            masked_data = self.get_masked_data()
+            if isinstance(masked_data, np.ma.MaskedArray):
+                # compressed() returns only non-masked values
+                valid_data = masked_data.compressed()
+                absmax = np.nanmax(np.abs(valid_data)) if len(valid_data) > 0 else 1.0
+            else:
+                absmax = np.nanmax(np.abs(masked_data))
             if absmax < 1e-10:
                 absmax = 1.0  # Avoid division by zero
             self.norm = TwoSlopeNorm(vmin=-absmax, vcenter=0.0, vmax=absmax)
-        
+
+        # Auto-configure for covariance matrices with proper normalization
+        # This ensures masked/NaN values are properly displayed as grey
+        if self.matrix_type == "cov" and self.norm is None:
+            from matplotlib.colors import TwoSlopeNorm, Normalize
+            # Use masked data to exclude NaN values from range calculation
+            masked_data = self.get_masked_data()
+            if isinstance(masked_data, np.ma.MaskedArray):
+                valid_data = masked_data.compressed()
+                if len(valid_data) > 0:
+                    vmin = np.nanmin(valid_data)
+                    vmax = np.nanmax(valid_data)
+                else:
+                    vmin, vmax = -1.0, 1.0
+            else:
+                vmin = np.nanmin(masked_data)
+                vmax = np.nanmax(masked_data)
+
+            # Use TwoSlopeNorm if data spans zero, otherwise use regular Normalize
+            if vmin < 0 < vmax:
+                self.norm = TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+            else:
+                self.norm = Normalize(vmin=vmin, vmax=vmax)
+
         if self.matrix_type == "corr" and isinstance(self.cmap, str) and self.cmap == "viridis":
             self.cmap = "RdYlGn"  # Diverging colormap for correlations
         
@@ -643,18 +719,48 @@ class MF34HeatmapData(HeatmapPlotData):
         # Auto-configure for correlation matrices
         if self.matrix_type == "corr" and self.norm is None:
             from matplotlib.colors import TwoSlopeNorm
-            absmax = np.nanmax(np.abs(self.matrix_data))
+            # Use masked data to exclude mask_value from absmax calculation
+            masked_data = self.get_masked_data()
+            if isinstance(masked_data, np.ma.MaskedArray):
+                # compressed() returns only non-masked values
+                valid_data = masked_data.compressed()
+                absmax = np.nanmax(np.abs(valid_data)) if len(valid_data) > 0 else 1.0
+            else:
+                absmax = np.nanmax(np.abs(masked_data))
             if absmax < 1e-10:
                 absmax = 1.0
             self.norm = TwoSlopeNorm(vmin=-absmax, vcenter=0.0, vmax=absmax)
-        
+
+        # Auto-configure for covariance matrices with proper normalization
+        # This ensures masked/NaN values are properly displayed as grey
+        if self.matrix_type == "cov" and self.norm is None:
+            from matplotlib.colors import TwoSlopeNorm, Normalize
+            # Use masked data to exclude NaN values from range calculation
+            masked_data = self.get_masked_data()
+            if isinstance(masked_data, np.ma.MaskedArray):
+                valid_data = masked_data.compressed()
+                if len(valid_data) > 0:
+                    vmin = np.nanmin(valid_data)
+                    vmax = np.nanmax(valid_data)
+                else:
+                    vmin, vmax = -1.0, 1.0
+            else:
+                vmin = np.nanmin(masked_data)
+                vmax = np.nanmax(masked_data)
+
+            # Use TwoSlopeNorm if data spans zero, otherwise use regular Normalize
+            if vmin < 0 < vmax:
+                self.norm = TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+            else:
+                self.norm = Normalize(vmin=vmin, vmax=vmax)
+
         if self.matrix_type == "corr" and isinstance(self.cmap, str) and self.cmap == "viridis":
             self.cmap = "RdYlGn"
-        
+
         # Auto-generate colorbar label
         if self.colorbar_label is None:
             self.colorbar_label = "Correlation" if self.matrix_type == "corr" else "Covariance"
-        
+
         # Store metadata
         self.metadata['isotope'] = self.isotope
         self.metadata['mt'] = self.mt

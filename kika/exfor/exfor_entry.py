@@ -193,6 +193,37 @@ class ExforEntry:
         zaid = self.zaid
         return zaid > 0 and (zaid % 1000) == 0
 
+    @property
+    def dataset_id(self) -> str:
+        """
+        Return the full dataset ID (entry + subentry).
+
+        Examples
+        --------
+        >>> entry.entry = "23365"
+        >>> entry.subentry = "005"
+        >>> entry.dataset_id
+        '23365005'
+        """
+        return f"{self.entry}{self.subentry}"
+
+    @property
+    def exfor_url(self) -> str:
+        """
+        Return the EXFOR URL for this entry on the IAEA website.
+
+        Format: https://www-nds.iaea.org/exfor/ENTRY.SUBENTRY
+        Example: Entry 23365, subentry 005 -> "https://www-nds.iaea.org/exfor/23365.005"
+
+        Returns
+        -------
+        str
+            URL to the EXFOR entry on the IAEA website
+        """
+        from kika.exfor._constants import EXFOR_URL_BASE
+        subentry_formatted = self.subentry.zfill(3)
+        return f"{EXFOR_URL_BASE}{self.entry}.{subentry_formatted}"
+
     # =========================================================================
     # Serialization Methods
     # =========================================================================

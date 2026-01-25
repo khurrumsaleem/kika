@@ -33,11 +33,15 @@ from kika.exfor._constants import (
     DB_DEFAULT_PATH,
     DB_UNIT_MAPPINGS,
     DB_FAMILY_MAPPINGS,
+    EXFOR_QUANTITY_CODES,
+    EXFOR_FAMILY_TO_VARIABLE,
 )
 from kika.exfor.config import get_tof_metadata_path
+from kika.exfor.experiment import ExforExperiment
 from kika._constants import ATOMIC_NUMBER_TO_SYMBOL, SYMBOL_TO_ATOMIC_NUMBER
 from kika._utils import zaid_to_symbol, symbol_to_zaid
 from kika.exfor.angular_distribution import ExforAngularDistribution
+from kika.exfor.cross_section import ExforCrossSection
 from kika.exfor.exfor_entry import ExforEntry
 
 # Module-level cache for TOF metadata
@@ -616,6 +620,15 @@ class X4ProDatabase:
         if row is None:
             return None
 
+        # Extract energy range from JSON data
+        e_min, e_max = None, None
+        try:
+            jx5z = self.get_dataset_json(dataset_id)
+            if jx5z:
+                e_min, e_max = self._extract_energy_range(jx5z)
+        except Exception:
+            pass  # Energy extraction failed, continue without energy
+
         return {
             "dataset_id": row["DatasetID"],
             "year": row["year1"],
@@ -627,6 +640,8 @@ class X4ProDatabase:
             "ndat": row["ndat"],
             "quant": row["quant1"],
             "reacode": row["reacode"],
+            "e_min": e_min,  # Energy min in MeV
+            "e_max": e_max,  # Energy max in MeV
         }
 
     def parse_dataset(self, dataset_id: str) -> Optional[X4ProDataset]:
@@ -841,7 +856,8 @@ class X4ProDatabase:
 
         The object type is determined by the quantity field (quant):
         - "DA" -> ExforAngularDistribution
-        - Other types -> NotImplementedError (for now)
+        - "SIG", "CS" -> ExforCrossSection
+        - Other types -> ExforExperiment (generic fallback)
 
         Parameters
         ----------
@@ -852,11 +868,6 @@ class X4ProDatabase:
         -------
         ExforEntry
             Appropriate ExforEntry subclass based on data type
-
-        Raises
-        ------
-        NotImplementedError
-            If the quantity type is not yet supported
         """
         quantity = dataset.quant.upper() if dataset.quant else ""
 
@@ -864,14 +875,12 @@ class X4ProDatabase:
         if "DA" in quantity:
             return self._convert_to_angular_distribution(dataset)
 
-        # Future: add other types here
-        # if "SIG" in quantity:
-        #     return self._convert_to_cross_section(dataset)
+        # Check for cross section (SIG, CS)
+        if "SIG" in quantity or quantity == "CS" or quantity.startswith("CS"):
+            return self._convert_to_cross_section(dataset)
 
-        raise NotImplementedError(
-            f"Quantity type '{quantity}' is not yet supported. "
-            f"Currently only angular distributions (DA) are implemented."
-        )
+        # Fallback to generic ExforExperiment for other quantities
+        return self._convert_to_experiment_generic(dataset)
 
     def _convert_to_angular_distribution(
         self, dataset: X4ProDataset
@@ -996,6 +1005,767 @@ class X4ProDatabase:
             units={"energy": "MeV", "angle": "deg", "cross_section": "b/sr"},
             _data_blocks=data_blocks,
         )
+
+    def _convert_to_cross_section(
+        self, dataset: X4ProDataset
+    ) -> "ExforCrossSection":
+        """
+        Convert X4ProDataset to ExforCrossSection.
+
+        Parameters
+        ----------
+        dataset : X4ProDataset
+            Parsed dataset from database
+
+        Returns
+        -------
+        ExforCrossSection
+            Cross section object with energy-dependent data
+        """
+        from kika.exfor.cross_section import ExforCrossSection
+
+        # Parse target
+        target_name, target_zaid = _parse_target_from_db(dataset.target)
+
+        # Convert energies to MeV
+        energies_mev = _convert_units(
+            dataset.energies_ev,
+            dataset.energy_unit,
+            "MEV",
+            "energy",
+        )
+
+        # Convert cross sections to barns (from b/sr to b for total XS)
+        # Note: cross section data from database is typically in barns, not b/sr
+        xs_unit = dataset.xs_unit.upper()
+        if "/SR" in xs_unit:
+            # This is differential - convert to b/sr then use that
+            xs_b = _convert_units(
+                dataset.cross_sections,
+                dataset.xs_unit,
+                "B/SR",
+                "cross_section",
+            )
+            unc_b = _convert_units(
+                dataset.uncertainties,
+                dataset.xs_unit,
+                "B/SR",
+                "cross_section",
+            )
+            xs_unit_out = "b/sr"
+        else:
+            # Total cross section in barns
+            # Map common units to barns
+            xs_factor_map = {
+                "B": 1.0, "MB": 1e-3, "UB": 1e-6, "MUB": 1e-6, "NB": 1e-9,
+            }
+            factor = xs_factor_map.get(xs_unit.replace("/SR", ""), 1.0)
+            xs_b = dataset.cross_sections * factor
+            unc_b = dataset.uncertainties * factor
+            xs_unit_out = "b"
+
+        # Build DataFrame
+        import pandas as pd
+        data_df = pd.DataFrame({
+            "energy": energies_mev,
+            "cross_section": xs_b,
+            "error": unc_b,
+        })
+
+        # Remove rows with NaN or zero energy
+        data_df = data_df[data_df["energy"] > 0].dropna(subset=["energy", "cross_section"])
+        data_df = data_df.sort_values("energy").reset_index(drop=True)
+
+        # Extract entry/subentry from dataset_id
+        entry = dataset.dataset_id[:5]
+        subentry = dataset.dataset_id[5:]
+
+        # Build citation
+        citation = {
+            "authors": [dataset.author],
+            "year": dataset.year,
+            "reference": f"EXFOR {dataset.dataset_id}",
+        }
+
+        # Build reaction
+        reaction = {
+            "target": target_name,
+            "target_zaid": target_zaid,
+            "projectile": dataset.projectile.lower(),
+            "process": "TOT" if dataset.mt == 1 else f"MT{dataset.mt}",
+            "notation": dataset.reacode,
+        }
+
+        return ExforCrossSection(
+            entry=entry,
+            subentry=subentry,
+            quantity=dataset.quant,
+            citation=citation,
+            reaction=reaction,
+            facility={},
+            method={},
+            units={"energy": "MeV", "cross_section": xs_unit_out},
+            _data=data_df,
+        )
+
+    def _convert_to_experiment_generic(
+        self, dataset: X4ProDataset
+    ) -> "ExforExperiment":
+        """
+        Convert X4ProDataset to generic ExforExperiment.
+
+        This is a fallback for quantity types that don't have specialized classes.
+
+        Parameters
+        ----------
+        dataset : X4ProDataset
+            Parsed dataset from database
+
+        Returns
+        -------
+        ExforExperiment
+            Generic experiment object
+        """
+        # Parse target
+        target_name, target_zaid = _parse_target_from_db(dataset.target)
+
+        # Extract entry/subentry
+        entry = dataset.dataset_id[:5]
+        subentry = dataset.dataset_id[5:]
+
+        # Build citation
+        citation = {
+            "authors": [dataset.author],
+            "year": dataset.year,
+            "reference": f"EXFOR {dataset.dataset_id}",
+        }
+
+        # Build reaction
+        reaction = {
+            "target": target_name,
+            "target_zaid": target_zaid,
+            "projectile": dataset.projectile.lower(),
+            "notation": dataset.reacode,
+        }
+
+        # Build generic DataFrame from available data
+        import pandas as pd
+        data_dict = {}
+
+        if len(dataset.energies_ev) > 0:
+            energies_mev = _convert_units(
+                dataset.energies_ev,
+                dataset.energy_unit,
+                "MEV",
+                "energy",
+            )
+            data_dict["energy"] = energies_mev
+
+        if len(dataset.angles_deg) > 0:
+            data_dict["angle"] = dataset.angles_deg
+
+        if len(dataset.cross_sections) > 0:
+            data_dict["value"] = dataset.cross_sections
+
+        if len(dataset.uncertainties) > 0:
+            data_dict["error"] = dataset.uncertainties
+
+        data_df = pd.DataFrame(data_dict)
+
+        # Determine independent variables
+        ind_vars = []
+        if "energy" in data_df.columns:
+            ind_vars.append("energy")
+        if "angle" in data_df.columns:
+            ind_vars.append("angle")
+
+        return ExforExperiment(
+            entry=entry,
+            subentry=subentry,
+            quantity=dataset.quant,
+            citation=citation,
+            reaction=reaction,
+            facility={},
+            method={},
+            independent_vars=ind_vars,
+            dependent_var="value",
+            units={"energy": "MeV"},
+            _data=data_df,
+        )
+
+    # =========================================================================
+    # Cross Section Query Methods
+    # =========================================================================
+
+    def query_cross_sections(
+        self,
+        target: str = None,
+        target_zaid: int = None,
+        projectile: str = "N",
+        mt: int = None,
+        energy_range: Tuple[float, float] = None,
+        convert_to_objects: bool = True,
+    ) -> Union[List["ExforCrossSection"], List[X4ProDataset]]:
+        """
+        Query cross section datasets from the database.
+
+        This method queries datasets with quantity type SIG/CS and optionally
+        converts them to ExforCrossSection objects.
+
+        Parameters
+        ----------
+        target : str, optional
+            Target in EXFOR notation (e.g., "26-FE-56") or "Fe56" format
+        target_zaid : int, optional
+            Target ZAID (e.g., 26056 for Fe-56). Alternative to target.
+        projectile : str, optional
+            Projectile (default: "N" for neutrons)
+        mt : int, optional
+            ENDF MT number (e.g., 1 for total, 2 for elastic, 18 for fission)
+        energy_range : Tuple[float, float], optional
+            Energy range (min, max) in MeV. Filters datasets with data in range.
+        convert_to_objects : bool, optional
+            If True (default), convert to ExforCrossSection objects.
+            If False, return X4ProDataset objects.
+
+        Returns
+        -------
+        List[ExforCrossSection] or List[X4ProDataset]
+            List of cross section datasets
+
+        Examples
+        --------
+        >>> db = X4ProDatabase()
+        >>> # Get total cross section data for Fe-56
+        >>> datasets = db.query_cross_sections(target_zaid=26056, mt=1)
+        >>> # Get elastic scattering cross sections
+        >>> datasets = db.query_cross_sections(target="Fe56", mt=2)
+        """
+        # Query dataset IDs - use SIG quantity and MF=3 (cross sections)
+        dataset_ids = self.query_dataset_ids(
+            target=target,
+            target_zaid=target_zaid,
+            projectile=projectile,
+            quantity="SIG",
+            mf=3,  # MF=3 for cross sections
+            mt=mt,
+        )
+
+        # Also query for CS quantity code
+        dataset_ids_cs = self.query_dataset_ids(
+            target=target,
+            target_zaid=target_zaid,
+            projectile=projectile,
+            quantity="CS",
+            mf=3,
+            mt=mt,
+        )
+
+        # Combine and deduplicate
+        all_dataset_ids = list(set(dataset_ids + dataset_ids_cs))
+
+        # Parse datasets
+        parsed_datasets = []
+        for ds_id in all_dataset_ids:
+            dataset = self.parse_dataset(ds_id)
+            if dataset is None:
+                continue
+
+            # Apply energy filter if specified
+            if energy_range is not None:
+                e_min, e_max = energy_range
+                e_min_ev = e_min * 1e6
+                e_max_ev = e_max * 1e6
+
+                ds_energies = dataset.energies_ev
+                if dataset.energy_unit.upper() == "MEV":
+                    ds_energies = ds_energies * 1e6
+                elif dataset.energy_unit.upper() == "KEV":
+                    ds_energies = ds_energies * 1e3
+
+                if len(ds_energies) == 0:
+                    continue
+                if np.max(ds_energies) < e_min_ev or np.min(ds_energies) > e_max_ev:
+                    continue
+
+            parsed_datasets.append(dataset)
+
+        if not convert_to_objects:
+            return parsed_datasets
+
+        # Convert to ExforCrossSection objects
+        return [self._convert_to_cross_section(ds) for ds in parsed_datasets]
+
+    # =========================================================================
+    # General Query Methods (for any quantity type)
+    # =========================================================================
+
+    def list_unique_quantities(
+        self,
+        projectile: str = "n",
+        target: str = None,
+    ) -> pd.DataFrame:
+        """
+        List all unique quantity codes in the database.
+
+        Parameters
+        ----------
+        projectile : str, optional
+            Projectile filter (default: "n" for neutrons)
+        target : str, optional
+            Target filter (e.g., "Fe-56", "Fe56", 26056)
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with columns: quantity, description, count
+        """
+        conn = self._get_connection()
+        conditions = []
+        params = []
+
+        proj_lower = projectile.lower()
+        conditions.append("(Proj = ? OR Proj = ?)")
+        params.extend([proj_lower, projectile.upper()])
+
+        if target:
+            target_pattern = self._normalize_target(target)
+            conditions.append("Targ1 = ?")
+            params.append(target_pattern)
+
+        query = f"""
+            SELECT quant1, COUNT(*) as count
+            FROM x4pro_ds
+            WHERE {' AND '.join(conditions)}
+            GROUP BY quant1
+            ORDER BY count DESC
+        """
+
+        cursor = conn.execute(query, params)
+        rows = cursor.fetchall()
+
+        results = []
+        for row in rows:
+            quant = row[0] if row[0] else "Unknown"
+            results.append({
+                "quantity": quant,
+                "description": EXFOR_QUANTITY_CODES.get(quant, "Unknown/custom"),
+                "count": row[1],
+            })
+
+        return pd.DataFrame(results)
+
+    def list_unique_reactions(
+        self,
+        projectile: str = "n",
+        target: str = None,
+    ) -> pd.DataFrame:
+        """
+        List all unique reaction codes in the database.
+
+        Parameters
+        ----------
+        projectile : str, optional
+            Projectile filter (default: "n" for neutrons)
+        target : str, optional
+            Target filter
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with columns: reacode, MT, count
+        """
+        conn = self._get_connection()
+        conditions = []
+        params = []
+
+        proj_lower = projectile.lower()
+        conditions.append("(Proj = ? OR Proj = ?)")
+        params.extend([proj_lower, projectile.upper()])
+
+        if target:
+            target_pattern = self._normalize_target(target)
+            conditions.append("Targ1 = ?")
+            params.append(target_pattern)
+
+        query = f"""
+            SELECT reacode, MT, COUNT(*) as count
+            FROM x4pro_ds
+            WHERE {' AND '.join(conditions)}
+            GROUP BY reacode
+            ORDER BY count DESC
+        """
+
+        cursor = conn.execute(query, params)
+        results = [{"reacode": row[0], "MT": row[1], "count": row[2]} for row in cursor.fetchall()]
+        return pd.DataFrame(results)
+
+    def query_experiments(
+        self,
+        targets: Union[str, List[str]] = None,
+        projectile: str = "n",
+        quantity: str = None,
+        mt: int = None,
+        mf: int = None,
+        energy_min_mev: float = None,
+        energy_max_mev: float = None,
+        year_min: int = None,
+        year_max: int = None,
+        author: str = None,
+    ) -> List[str]:
+        """
+        General query for experiments with flexible filtering.
+
+        Supports multiple targets with OR logic.
+
+        Parameters
+        ----------
+        targets : str or List[str], optional
+            Single target or list of targets (OR logic)
+        projectile : str, optional
+            Projectile (default: "n")
+        quantity : str, optional
+            Quantity code (e.g., "SIG", "DA", "FY")
+        mt : int, optional
+            ENDF MT number
+        mf : int, optional
+            ENDF MF number
+        energy_min_mev : float, optional
+            Minimum energy in MeV
+        energy_max_mev : float, optional
+            Maximum energy in MeV
+        year_min : int, optional
+            Minimum publication year
+        year_max : int, optional
+            Maximum publication year
+        author : str, optional
+            Author name (partial match)
+
+        Returns
+        -------
+        List[str]
+            List of dataset IDs
+        """
+        conn = self._get_connection()
+        conditions = []
+        params = []
+
+        # Handle multiple targets (OR logic)
+        if targets is not None:
+            if isinstance(targets, str):
+                targets = [targets]
+            target_conditions = []
+            for t in targets:
+                pattern = self._normalize_target(t)
+                target_conditions.append("Targ1 = ?")
+                params.append(pattern)
+            if len(target_conditions) == 1:
+                conditions.append(target_conditions[0])
+            else:
+                conditions.append(f"({' OR '.join(target_conditions)})")
+
+        # Projectile
+        if projectile:
+            proj_lower = projectile.lower()
+            conditions.append("(Proj = ? OR Proj = ?)")
+            params.extend([proj_lower, projectile.upper()])
+
+        # Quantity (partial match)
+        if quantity:
+            conditions.append("quant1 LIKE ?")
+            params.append(f"%{quantity}%")
+
+        # MF/MT
+        if mf is not None:
+            conditions.append("MF = ?")
+            params.append(mf)
+        if mt is not None:
+            conditions.append("MT = ?")
+            params.append(mt)
+
+        # Year range
+        if year_min is not None:
+            conditions.append("year1 >= ?")
+            params.append(year_min)
+        if year_max is not None:
+            conditions.append("year1 <= ?")
+            params.append(year_max)
+
+        # Author
+        if author:
+            conditions.append("author1 LIKE ?")
+            params.append(f"%{author}%")
+
+        query = "SELECT DatasetID FROM x4pro_ds"
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        cursor = conn.execute(query, params)
+        return [row[0] for row in cursor.fetchall()]
+
+    def list_experiments_general(
+        self,
+        targets: Union[str, List[str]] = None,
+        projectile: str = "n",
+        quantity: str = None,
+        mt: int = None,
+        year_min: int = None,
+        year_max: int = None,
+        author: str = None,
+    ) -> pd.DataFrame:
+        """
+        List experiments matching criteria with detailed info.
+
+        Parameters
+        ----------
+        targets : str or List[str], optional
+            Single target or list of targets (OR logic)
+        projectile : str, optional
+            Projectile (default: "n")
+        quantity : str, optional
+            Quantity code
+        mt : int, optional
+            ENDF MT number
+        year_min : int, optional
+            Minimum publication year
+        year_max : int, optional
+            Maximum publication year
+        author : str, optional
+            Author name (partial match)
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with columns: dataset_id, author, year, target, quantity,
+            reacode, ndat, energy_min_mev, energy_max_mev
+        """
+        dataset_ids = self.query_experiments(
+            targets=targets, projectile=projectile, quantity=quantity,
+            mt=mt, year_min=year_min, year_max=year_max, author=author
+        )
+
+        results = []
+        for ds_id in dataset_ids:
+            metadata = self.get_dataset_metadata(ds_id)
+            if metadata:
+                # Get energy range from JSON
+                jx5z = self.get_dataset_json(ds_id)
+                e_min, e_max = self._extract_energy_range(jx5z)
+
+                results.append({
+                    "dataset_id": ds_id,
+                    "author": metadata["author"],
+                    "year": metadata["year"],
+                    "target": metadata["target"],
+                    "quantity": metadata["quant"],
+                    "reacode": metadata["reacode"],
+                    "ndat": metadata["ndat"],
+                    "energy_min_mev": e_min,
+                    "energy_max_mev": e_max,
+                })
+
+        return pd.DataFrame(results)
+
+    def load_experiment_general(self, dataset_id: str) -> "ExforExperiment":
+        """
+        Load any experiment as a general ExforExperiment object.
+
+        Works with ANY quantity type (SIG, DA, FY, NU, etc.)
+
+        Parameters
+        ----------
+        dataset_id : str
+            EXFOR dataset identifier (e.g., "10571002")
+
+        Returns
+        -------
+        ExforExperiment
+            General experiment object with data and metadata
+
+        Raises
+        ------
+        ValueError
+            If dataset is not found
+        """
+        from kika.exfor.experiment import ExforExperiment
+
+        metadata = self.get_dataset_metadata(dataset_id)
+        if metadata is None:
+            raise ValueError(f"Dataset {dataset_id} not found")
+
+        jx5z = self.get_dataset_json(dataset_id)
+        if jx5z is None:
+            raise ValueError(f"No JSON data for dataset {dataset_id}")
+
+        # Parse data generically
+        data_df, units, ind_vars, dep_var = self._parse_general_data(jx5z)
+
+        entry = dataset_id[:5]
+        subentry = dataset_id[5:]
+
+        citation = {
+            "authors": [metadata["author"]],
+            "year": metadata["year"],
+            "reference": f"EXFOR {dataset_id}",
+        }
+
+        target_name, target_zaid = _parse_target_from_db(metadata["target"])
+
+        reaction = {
+            "target": target_name,
+            "target_zaid": target_zaid,
+            "projectile": metadata["projectile"].lower(),
+            "notation": metadata["reacode"],
+        }
+
+        return ExforExperiment(
+            entry=entry,
+            subentry=subentry,
+            quantity=metadata["quant"],
+            citation=citation,
+            reaction=reaction,
+            facility={},
+            method={},
+            units=units,
+            independent_vars=ind_vars,
+            dependent_var=dep_var,
+            _data=data_df,
+        )
+
+    def _parse_general_data(
+        self, jx5z: Dict[str, Any]
+    ) -> Tuple[pd.DataFrame, Dict[str, str], List[str], str]:
+        """
+        Parse x4data/c5data for any quantity type into DataFrame.
+
+        Parameters
+        ----------
+        jx5z : Dict[str, Any]
+            Parsed JSON from database
+
+        Returns
+        -------
+        Tuple[pd.DataFrame, Dict[str, str], List[str], str]
+            (DataFrame, units_dict, independent_vars, dependent_var)
+        """
+        c5data = jx5z.get("c5data", {})
+        x4data = jx5z.get("x4data", [])
+
+        columns = {}
+        units = {}
+        ind_vars = []
+        dep_var = "value"
+
+        # Try c5data first
+        if isinstance(c5data, dict):
+            if "y" in c5data:
+                y_data = c5data["y"]
+                columns["value"] = y_data.get("y", [])
+                columns["error"] = y_data.get("dy", [])
+                units["value"] = y_data.get("units", "")
+
+            for i in [1, 2, 3]:
+                key = f"x{i}"
+                if key in c5data:
+                    x_data = c5data[key]
+                    fam = x_data.get("fam", "")
+                    var_name = EXFOR_FAMILY_TO_VARIABLE.get(fam, fam.lower() or f"x{i}")
+                    columns[var_name] = x_data.get(key, [])
+                    units[var_name] = x_data.get("units", "")
+                    ind_vars.append(var_name)
+
+        # Fallback to x4data
+        if not columns.get("value"):
+            for var in x4data:
+                fam = var.get("fam", "")
+                cvar = var.get("cvar", "")
+                dat0 = var.get("dat0", [])
+                unit = var.get("units", "")
+
+                if cvar == "y":
+                    columns["value"] = dat0
+                    units["value"] = unit
+                elif cvar.startswith("x"):
+                    var_name = EXFOR_FAMILY_TO_VARIABLE.get(fam, fam.lower() or cvar)
+                    columns[var_name] = dat0
+                    units[var_name] = unit
+                    if var_name not in ind_vars:
+                        ind_vars.append(var_name)
+                elif cvar == "dy":
+                    columns["error"] = dat0
+
+        # Ensure all arrays have the same length
+        if columns:
+            max_length = max(len(arr) if isinstance(arr, list) else 1 for arr in columns.values())
+            for key, arr in columns.items():
+                if isinstance(arr, list):
+                    if len(arr) < max_length:
+                        # Pad shorter arrays with appropriate values
+                        if key == "error":
+                            columns[key] = arr + [0.0] * (max_length - len(arr))
+                        else:
+                            # For other columns, pad with the last value or NaN
+                            pad_value = arr[-1] if arr else np.nan
+                            columns[key] = arr + [pad_value] * (max_length - len(arr))
+                else:
+                    # Convert single values to lists of the appropriate length
+                    columns[key] = [arr] * max_length
+
+        df = pd.DataFrame(columns)
+        if "error" not in df.columns and "value" in df.columns:
+            df["error"] = 0.0
+
+        return df, units, ind_vars, dep_var
+
+    def _extract_energy_range(
+        self, jx5z: Optional[Dict[str, Any]]
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Extract energy range from JSON data, return in MeV.
+
+        Parameters
+        ----------
+        jx5z : Dict[str, Any] or None
+            Parsed JSON from database
+
+        Returns
+        -------
+        Tuple[Optional[float], Optional[float]]
+            (min_energy_mev, max_energy_mev) or (None, None)
+        """
+        if not jx5z:
+            return None, None
+
+        # Try c5data first
+        c5data = jx5z.get("c5data", {})
+        if isinstance(c5data, dict) and "x1" in c5data:
+            x1 = c5data["x1"]
+            if x1.get("fam") == "EN":
+                energies = np.array(x1.get("x1", []), dtype=float)
+                unit = x1.get("units", "EV").upper()
+                energies = energies[~np.isnan(energies)]
+                if len(energies) > 0:
+                    if unit == "EV":
+                        energies = energies / 1e6
+                    elif unit == "KEV":
+                        energies = energies / 1e3
+                    return float(np.min(energies)), float(np.max(energies))
+
+        # Try x4data
+        x4data = jx5z.get("x4data", [])
+        for var in x4data:
+            if var.get("fam") == "EN":
+                energies = np.array(var.get("dat0", []), dtype=float)
+                unit = var.get("units", "EV").upper()
+                energies = energies[~np.isnan(energies)]
+                if len(energies) > 0:
+                    if unit == "EV":
+                        energies = energies / 1e6
+                    elif unit == "KEV":
+                        energies = energies / 1e3
+                    return float(np.min(energies)), float(np.max(energies))
+
+        return None, None
 
     def get_statistics(self) -> Dict[str, int]:
         """
