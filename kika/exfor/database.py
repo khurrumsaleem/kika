@@ -243,6 +243,7 @@ def _parse_x4data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
         "energy_unit": "EV",
         "angle_unit": "ADEG",
         "xs_unit": "B/SR",
+        "uncertainty_unit": "",  # Track uncertainty unit for PER-CENT detection
         "angle_type": "ANG",  # 'ANG' or 'COS'
     }
 
@@ -273,6 +274,7 @@ def _parse_x4data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
         elif cvar == "dy" or fam in ("dData", "DATA-ERR"):
             # Uncertainty values
             result["uncertainties"] = dat0
+            result["uncertainty_unit"] = units  # Capture unit for PER-CENT detection
 
     return result
 
@@ -355,6 +357,43 @@ def _parse_c5data_json(jx5z: Dict[str, Any]) -> Dict[str, Any]:
         result["correction_notes"] = auto_corr_notes if isinstance(auto_corr_notes, list) else [auto_corr_notes]
 
     return result
+
+
+# Constants for percentage uncertainty detection
+_PERCENT_UNIT_INDICATORS = ("PER-CENT", "PC", "%", "PERCENT")
+
+
+def _is_percent_unit(unit_str: str) -> bool:
+    """Check if a unit string indicates percentage values."""
+    return unit_str.upper() in _PERCENT_UNIT_INDICATORS
+
+
+def _convert_percent_to_absolute(
+    uncertainties: np.ndarray,
+    values: np.ndarray,
+    unc_unit: str,
+) -> np.ndarray:
+    """
+    Convert percentage uncertainties to absolute values.
+
+    Parameters
+    ----------
+    uncertainties : np.ndarray
+        Uncertainty values (may be in percent)
+    values : np.ndarray
+        Cross section values (absolute)
+    unc_unit : str
+        Unit string for uncertainties (e.g., "PER-CENT", "B/SR")
+
+    Returns
+    -------
+    np.ndarray
+        Absolute uncertainties in the same units as values
+    """
+    if _is_percent_unit(unc_unit):
+        # Values are percentages (e.g., 4.36 means 4.36%)
+        return np.abs(values) * (uncertainties / 100.0)
+    return uncertainties
 
 
 def _convert_units(
@@ -459,8 +498,8 @@ class X4ProDatabase:
 
     def query_dataset_ids(
         self,
-        target: str = None,
-        target_zaid: int = None,
+        target: Union[str, List[str]] = None,
+        target_zaid: Union[int, List[int]] = None,
         projectile: str = "N",
         quantity: str = "DA",
         mf: int = None,
@@ -476,10 +515,10 @@ class X4ProDatabase:
 
         Parameters
         ----------
-        target : str, optional
-            Target in EXFOR notation (e.g., "26-FE-56")
-        target_zaid : int, optional
-            Target ZAID (e.g., 26056 for Fe-56)
+        target : str or List[str], optional
+            Target in EXFOR notation (e.g., "26-FE-56" or ["Fe-56", "Fe-0"])
+        target_zaid : int or List[int], optional
+            Target ZAID (e.g., 26056 for Fe-56, or [26056, 26000] for Fe-56 + natural)
         projectile : str, optional
             Projectile (default: "N" for neutrons)
         quantity : str, optional
@@ -510,16 +549,36 @@ class X4ProDatabase:
         conditions = []
         params = []
 
-        # Target filtering
+        # Target filtering - now supports lists
         if target:
-            conditions.append("Targ1 LIKE ?")
-            params.append(f"%{target}%")
+            # Convert single value to list for uniform handling
+            target_list = [target] if isinstance(target, str) else target
+            if len(target_list) == 1:
+                conditions.append("Targ1 LIKE ?")
+                params.append(f"%{target_list[0]}%")
+            else:
+                # Multiple targets: use OR condition
+                target_conditions = ["Targ1 LIKE ?" for _ in target_list]
+                conditions.append(f"({' OR '.join(target_conditions)})")
+                params.extend([f"%{t}%" for t in target_list])
         elif target_zaid:
-            # Convert ZAID to database target format (e.g., 26056 -> "Fe-56")
-            target_pattern = _zaid_to_target_pattern(target_zaid)
-            if target_pattern:
-                conditions.append("Targ1 = ?")
-                params.append(target_pattern)
+            # Convert ZAID(s) to database target format(s)
+            zaid_list = [target_zaid] if isinstance(target_zaid, int) else target_zaid
+            target_patterns = []
+            for zaid in zaid_list:
+                pattern = _zaid_to_target_pattern(zaid)
+                if pattern:
+                    target_patterns.append(pattern)
+
+            if target_patterns:
+                if len(target_patterns) == 1:
+                    conditions.append("Targ1 = ?")
+                    params.append(target_patterns[0])
+                else:
+                    # Multiple targets: use OR condition with exact match
+                    target_conditions = ["Targ1 = ?" for _ in target_patterns]
+                    conditions.append(f"({' OR '.join(target_conditions)})")
+                    params.extend(target_patterns)
 
         # Projectile (database uses lowercase for common particles: n, p, d, a, g)
         if projectile:
@@ -688,14 +747,38 @@ class X4ProDatabase:
         xs_unit = parsed["xs_unit"]
         angle_type = parsed["angle_type"]
 
+        # Check x4data for PER-CENT uncertainties - c5data may have incorrect conversion
+        # The X4Pro database sometimes incorrectly processes PER-CENT uncertainties in c5data
+        x4_parsed = _parse_x4data_json(jx5z)
+        x4_unc_unit = x4_parsed.get("uncertainty_unit", "")
+        if _is_percent_unit(x4_unc_unit) and x4_parsed["uncertainties"] and x4_parsed["values"]:
+            # x4data has percentage uncertainties - convert properly using x4data values
+            x4_values = np.array(x4_parsed["values"], dtype=float)
+            x4_unc_raw = np.array(x4_parsed["uncertainties"], dtype=float)
+            uncertainties = _convert_percent_to_absolute(x4_unc_raw, x4_values, x4_unc_unit)
+            # Note: uncertainties are now in the same units as x4_parsed xs_unit
+            # We need to ensure they match the c5data values which may have different scaling
+            # Since we're using x4_values for the conversion, apply the same unit conversion
+            if x4_parsed["xs_unit"].upper() != xs_unit.upper() and len(values) > 0:
+                # Scale uncertainties to match c5data value scale
+                # This handles cases where c5data values are in different units than x4data
+                scale_factor = np.mean(np.abs(values)) / np.mean(np.abs(x4_values)) if np.mean(np.abs(x4_values)) > 0 else 1.0
+                uncertainties = uncertainties * scale_factor
+
         # Fallback to x4data if c5data is empty/incomplete
         if len(values) == 0:
-            x4_parsed = _parse_x4data_json(jx5z)
+            # x4_parsed was already computed above for PER-CENT check
             if x4_parsed["values"]:
                 values = np.array(x4_parsed["values"], dtype=float)
                 xs_unit = x4_parsed["xs_unit"]
             if x4_parsed["uncertainties"]:
-                uncertainties = np.array(x4_parsed["uncertainties"], dtype=float)
+                x4_unc_raw = np.array(x4_parsed["uncertainties"], dtype=float)
+                x4_unc_unit = x4_parsed.get("uncertainty_unit", "")
+                # Convert PER-CENT to absolute if needed
+                if _is_percent_unit(x4_unc_unit) and len(values) > 0:
+                    uncertainties = _convert_percent_to_absolute(x4_unc_raw, values, x4_unc_unit)
+                else:
+                    uncertainties = x4_unc_raw
 
         if len(energies) == 0:
             x4_parsed = _parse_x4data_json(jx5z)
@@ -750,8 +833,8 @@ class X4ProDatabase:
 
     def query_angular_distributions(
         self,
-        target: str = None,
-        target_zaid: int = None,
+        target: Union[str, List[str]] = None,
+        target_zaid: Union[int, List[int]] = None,
         projectile: str = "N",
         process: str = None,
         energy_range: Tuple[float, float] = None,
@@ -767,10 +850,11 @@ class X4ProDatabase:
 
         Parameters
         ----------
-        target : str, optional
-            Target in EXFOR notation (e.g., "26-FE-56")
-        target_zaid : int, optional
-            Target ZAID (e.g., 26056 for Fe-56). Alternative to target.
+        target : str or List[str], optional
+            Target in EXFOR notation (e.g., "26-FE-56" or ["Fe-56", "Fe-0"])
+        target_zaid : int or List[int], optional
+            Target ZAID (e.g., 26056 for Fe-56, or [26056, 26000] for Fe-56 + natural).
+            Alternative to target.
         projectile : str, optional
             Projectile (default: "N" for neutrons)
         process : str, optional
@@ -793,6 +877,8 @@ class X4ProDatabase:
         >>> db = X4ProDatabase()
         >>> # Get all elastic scattering data for Fe-56
         >>> datasets = db.query_angular_distributions(target_zaid=26056, mt=2)
+        >>> # Get data for both Fe-56 and natural iron
+        >>> datasets = db.query_angular_distributions(target_zaid=[26056, 26000], mt=2)
         >>> # Get data in specific energy range
         >>> datasets = db.query_angular_distributions(
         ...     target_zaid=26056,
@@ -2147,9 +2233,27 @@ class X4ProDatabase:
 
         return copied_count
 
-    def _normalize_target(self, target: Union[str, int]) -> str:
+    def _normalize_target(self, target: Union[str, int, List[str], List[int]]) -> Union[str, List[str]]:
         """
         Normalize target input to database format (e.g., "Fe-56").
+
+        Accepts single values or lists:
+        - "Fe56", "Fe-56", 26056, "26-FE-56", "Fe" (natural element)
+        - [26056, 26000] for multiple ZAIDs
+        - ["Fe-56", "Fe-0"] for multiple targets
+
+        Returns: "Fe-56" or "Fe-0" for natural elements (database format),
+                 or a list of normalized targets if input was a list.
+        """
+        # Handle list inputs
+        if isinstance(target, list):
+            return [self._normalize_single_target(t) for t in target]
+
+        return self._normalize_single_target(target)
+
+    def _normalize_single_target(self, target: Union[str, int]) -> str:
+        """
+        Normalize a single target input to database format (e.g., "Fe-56").
 
         Accepts: "Fe56", "Fe-56", 26056, "26-FE-56", "Fe" (natural element)
         Returns: "Fe-56" or "Fe-0" for natural elements (database format)

@@ -53,7 +53,7 @@ def read_exfor(filepath: str) -> "ExforAngularDistribution":
 
 
 def read_all_exfor(
-    target: Union[str, int] = None,
+    target: Union[str, int, List[str], List[int]] = None,
     mt: int = None,
     source: str = "database",
     directory: str = None,
@@ -63,9 +63,11 @@ def read_all_exfor(
     projectile: str = "n",
     energy_range: Tuple[float, float] = None,
     supplementary_json_files: List[str] = None,
+    return_load_status: bool = False,
+    exclude_experiments: List[str] = None,
     # Deprecated parameter for backwards compatibility
-    target_zaid: int = None,
-) -> Union[Dict[float, List], Dict[str, "ExforAngularDistribution"]]:
+    target_zaid: Union[int, List[int]] = None,
+) -> Union[Dict[float, List], Dict[str, "ExforAngularDistribution"], Tuple[Dict, Dict]]:
     """
     Read EXFOR angular distribution data.
 
@@ -75,12 +77,14 @@ def read_all_exfor(
 
     Parameters
     ----------
-    target : str or int, optional
-        Target isotope. Accepts multiple formats:
+    target : str, int, List[str], or List[int], optional
+        Target isotope(s). Accepts multiple formats:
         - "Fe56" (symbol + mass)
         - 26056 (ZAID)
         - "Fe-56" (database format)
         - "26-FE-56" (EXFOR notation)
+        - [26056, 26000] (list of ZAIDs for multiple targets)
+        - ["Fe-56", "Fe-0"] (list of targets)
     mt : int, optional
         ENDF MT number (e.g., 2 for elastic scattering)
     source : str, optional
@@ -102,12 +106,22 @@ def read_all_exfor(
         List of additional JSON file paths to load. Useful for loading
         experiments not yet in the database (e.g., recent publications).
         These are loaded after the main source and deduplicated by ID.
+    return_load_status : bool, optional
+        If True, return a tuple of (data, supplementary_status) where
+        supplementary_status is a dict with 'loaded', 'failed', and 'skipped'
+        lists. Useful for logging which supplementary files were processed.
+    exclude_experiments : List[str], optional
+        List of experiments to exclude from loading. Accepts multiple formats:
+        - "20743" - excludes all subentries starting with 20743
+        - "20743002" - excludes specific dataset
+        - "20743/002" - same as above
 
     Returns
     -------
-    Dict[float, List[ExforAngularDistribution]]
+    Dict[float, List[ExforAngularDistribution]] or Tuple
         Dictionary mapping energy (MeV) to list of datasets.
         If group_by_energy=False: Dict mapping ID to dataset.
+        If return_load_status=True: Tuple of (data, supplementary_status).
 
     Examples
     --------
@@ -116,6 +130,9 @@ def read_all_exfor(
 
     >>> # Load using ZAID
     >>> data = read_all_exfor(target=26056, mt=2)
+
+    >>> # Load both Fe-56 and natural iron (recommended for better data coverage)
+    >>> data = read_all_exfor(target=[26056, 26000], mt=2)
 
     >>> # Load only from your curated JSON files
     >>> data = read_all_exfor(source="json", directory="/path/to/data/")
@@ -188,10 +205,15 @@ def read_all_exfor(
                     )
 
     # Load supplementary JSON files (for experiments not in database)
+    supplementary_status = {'loaded': [], 'failed': [], 'skipped': []}
+
     if supplementary_json_files:
         for json_file in supplementary_json_files:
             if not os.path.exists(json_file):
-                print(f"Warning: Supplementary file not found: {json_file}")
+                supplementary_status['failed'].append({
+                    'file': json_file,
+                    'error': 'File not found'
+                })
                 continue
             try:
                 exfor = read_exfor(json_file)
@@ -199,15 +221,40 @@ def read_all_exfor(
                 if ds_id not in loaded_ids:
                     all_datasets.append(exfor)
                     loaded_ids.add(ds_id)
+                    supplementary_status['loaded'].append({
+                        'file': json_file,
+                        'id': ds_id,
+                        'label': getattr(exfor, 'label', 'unknown'),
+                        'n_energies': len(exfor.energies()),
+                    })
+                else:
+                    supplementary_status['skipped'].append({
+                        'file': json_file,
+                        'id': ds_id,
+                        'reason': 'Already in database'
+                    })
             except Exception as e:
-                print(f"Warning: Could not load supplementary file {json_file}: {e}")
+                supplementary_status['failed'].append({
+                    'file': json_file,
+                    'error': str(e)
+                })
 
     if not all_datasets:
         raise FileNotFoundError("No EXFOR data found from any source")
 
+    # Filter out excluded experiments
+    if exclude_experiments:
+        all_datasets = _filter_excluded_experiments(all_datasets, exclude_experiments)
+
+    if not all_datasets:
+        raise FileNotFoundError("All EXFOR data was excluded by exclude_experiments filter")
+
     # Organize results
     if not group_by_energy:
-        return {f"{ds.entry}{ds.subentry}": ds for ds in all_datasets}
+        result = {f"{ds.entry}{ds.subentry}": ds for ds in all_datasets}
+        if return_load_status:
+            return result, supplementary_status
+        return result
 
     # Group by energy
     energy_data: Dict[float, List[ExforAngularDistribution]] = {}
@@ -220,12 +267,14 @@ def read_all_exfor(
             if exfor not in energy_data[key]:
                 energy_data[key].append(exfor)
 
+    if return_load_status:
+        return energy_data, supplementary_status
     return energy_data
 
 
 def _load_from_database(
     db_path: str = None,
-    target: Union[str, int] = None,
+    target: Union[str, int, List[str], List[int]] = None,
     projectile: str = "n",
     mt: int = None,
     energy_range: Tuple[float, float] = None,
@@ -237,8 +286,8 @@ def _load_from_database(
     ----------
     db_path : str, optional
         Path to database file
-    target : str or int, optional
-        Target (accepts "Fe56", 26056, "Fe-56", etc.)
+    target : str, int, List[str], or List[int], optional
+        Target (accepts "Fe56", 26056, "Fe-56", [26056, 26000], etc.)
     projectile : str, optional
         Projectile (default: "n")
     mt : int, optional
@@ -254,7 +303,7 @@ def _load_from_database(
     from kika.exfor.database import X4ProDatabase
 
     with X4ProDatabase(db_path) as db:
-        # Normalize target to database format
+        # Normalize target(s) to database format
         target_pattern = db._normalize_target(target) if target else None
 
         return db.query_angular_distributions(
@@ -350,3 +399,72 @@ def _resolve_energy_key(energy: float, energy_dict: Dict[float, List]) -> float:
         if math.isclose(existing, energy, rel_tol=0.0, abs_tol=ENERGY_MATCH_ABS_TOL):
             return existing
     return energy
+
+
+def _filter_excluded_experiments(
+    datasets: List["ExforAngularDistribution"],
+    exclude_experiments: List[str],
+) -> List["ExforAngularDistribution"]:
+    """
+    Filter out experiments matching exclusion patterns.
+
+    Parameters
+    ----------
+    datasets : List[ExforAngularDistribution]
+        List of datasets to filter
+    exclude_experiments : List[str]
+        List of experiment IDs to exclude. Accepts:
+        - "20743" - excludes all subentries starting with 20743
+        - "20743002" - excludes specific dataset
+        - "20743/002" - same as above
+
+    Returns
+    -------
+    List[ExforAngularDistribution]
+        Filtered list with excluded experiments removed
+    """
+    if not exclude_experiments:
+        return datasets
+
+    # Parse exclusion patterns
+    exclusion_set = set()
+    prefix_exclusions = set()
+
+    for item in exclude_experiments:
+        item = item.strip()
+        if not item:
+            continue
+
+        # Handle "entry/subentry" format
+        if "/" in item:
+            parts = item.split("/")
+            entry = parts[0].strip()
+            subentry = parts[1].strip() if len(parts) > 1 else ""
+            exclusion_set.add(entry + subentry)
+        elif len(item) <= 5:
+            # Short ID - treat as entry prefix (matches all subentries)
+            prefix_exclusions.add(item)
+        else:
+            # Full dataset ID
+            exclusion_set.add(item)
+
+    # Filter datasets
+    filtered = []
+    for ds in datasets:
+        ds_id = f"{ds.entry}{ds.subentry}"
+
+        # Check exact match
+        if ds_id in exclusion_set:
+            continue
+
+        # Check prefix match
+        excluded_by_prefix = False
+        for prefix in prefix_exclusions:
+            if ds_id.startswith(prefix):
+                excluded_by_prefix = True
+                break
+
+        if not excluded_by_prefix:
+            filtered.append(ds)
+
+    return filtered

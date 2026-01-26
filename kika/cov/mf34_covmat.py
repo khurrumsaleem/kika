@@ -36,8 +36,10 @@ class MF34CovMat:
     matrices : List[np.ndarray]
         List of covariance matrices
     is_relative : List[bool]
-        List of flags indicating if matrix values are relative (True) or absolute (False)
-        False only when LB=0 is present
+        List of flags indicating if matrix values are relative (True) or absolute (False).
+        False only when LB=0 is present. For ENDF-normalized Legendre coefficients
+        a_l = (c_l/c0)/(2l+1), the covariance values are inherently relative since
+        the coefficients are already normalized by the total cross section.
     frame : List[str]
         List of reference frames for each matrix:
         - "same-as-MF4" when LCT=0

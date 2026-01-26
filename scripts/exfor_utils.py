@@ -116,7 +116,7 @@ def _format_condensed_experiments(experiments_info: List[Dict]) -> List[str]:
 
     Instead of listing each experiment occurrence separately, this groups
     multiple occurrences of the same experiment and summarizes:
-    - Number of energies used
+    - Number of energies used (and if deduplication occurred)
     - Energy range
     - Total number of angular points
     - Weight range
@@ -126,6 +126,7 @@ def _format_condensed_experiments(experiments_info: List[Dict]) -> List[str]:
     experiments_info : List[Dict]
         List of experiment info dicts with keys:
         entry, subentry, author, year, exfor_energy_mev, kernel_weight, n_points
+        Optionally includes 'selected_from_n_energies' for deduplication info.
 
     Returns
     -------
@@ -142,6 +143,7 @@ def _format_condensed_experiments(experiments_info: List[Dict]) -> List[str]:
         'energies': [],
         'weights': [],
         'total_points': 0,
+        'selected_from_n_energies': 0,  # Track deduplication
     })
 
     for exp in experiments_info:
@@ -151,6 +153,10 @@ def _format_condensed_experiments(experiments_info: List[Dict]) -> List[str]:
         grouped[key]['energies'].append(exp['exfor_energy_mev'])
         grouped[key]['weights'].append(exp['kernel_weight'])
         grouped[key]['total_points'] += exp['n_points']
+        # Track deduplication info (use max in case there are multiple)
+        n_in_bin = exp.get('selected_from_n_energies', 1)
+        if n_in_bin > grouped[key]['selected_from_n_energies']:
+            grouped[key]['selected_from_n_energies'] = n_in_bin
 
     # Format each group
     lines = []
@@ -168,11 +174,22 @@ def _format_condensed_experiments(experiments_info: List[Dict]) -> List[str]:
 
         total_pts = data['total_points']
 
-        # Format energy string
+        # Track deduplication
+        n_in_bin = data['selected_from_n_energies']
+
+        # Format energy string with deduplication info
         if n_energies == 1:
-            energy_str = f"{e_min:.4f} MeV"
+            if n_in_bin > 1:
+                # Single energy selected from multiple in bin
+                energy_str = f"{e_min:.4f} MeV (closest of {n_in_bin} in bin)"
+            else:
+                energy_str = f"{e_min:.4f} MeV"
         else:
-            energy_str = f"{n_energies} energies [{e_min:.4f}-{e_max:.4f} MeV]"
+            # Multiple energies used (shouldn't happen with deduplication, but handle anyway)
+            if n_in_bin > n_energies:
+                energy_str = f"{n_energies} energies [{e_min:.4f}-{e_max:.4f} MeV] (from {n_in_bin} in bin)"
+            else:
+                energy_str = f"{n_energies} energies [{e_min:.4f}-{e_max:.4f} MeV]"
 
         # Format weight string
         if abs(w_max - w_min) < 0.001:
@@ -406,6 +423,7 @@ def compute_energy_bins_with_tof_resolution(
 
 def build_exfor_cache_from_objects(
     exfor_objects: List[ExforAngularDistribution],
+    exclude_experiments: Optional[List[str]] = None,
 ) -> Tuple[Dict[float, List[Tuple[pd.DataFrame, Dict]]], List[float]]:
     """
     Build an EXFOR data cache from ExforAngularDistribution objects.
@@ -418,6 +436,11 @@ def build_exfor_cache_from_objects(
     ----------
     exfor_objects : List[ExforAngularDistribution]
         List of EXFOR angular distribution objects to cache
+    exclude_experiments : List[str], optional
+        List of experiments to exclude from the cache. Accepts multiple formats:
+        - "20743" - excludes all subentries starting with 20743
+        - "20743002" - excludes specific dataset
+        - "20743/002" - same as above
 
     Returns
     -------
@@ -443,17 +466,27 @@ def build_exfor_cache_from_objects(
     exfor_cache: Dict[float, List[Tuple[pd.DataFrame, Dict]]] = {}
     all_energies = set()
 
+    # Parse exclusion patterns
+    exclusion_patterns = _parse_exclusion_list(exclude_experiments)
+
     for exfor in exfor_objects:
+        # Check if experiment is excluded
+        if _is_experiment_excluded(exfor.entry, exfor.subentry, exclusion_patterns):
+            continue
+
         # Get all available energies in MeV
         energies_mev = exfor.energies(unit='MeV')
 
         for energy_mev in energies_mev:
             # Get data at this energy using to_dataframe
+            # Use small tolerance (0.1 keV) to avoid mixing data from different energies
+            # while allowing for floating point precision issues
             df = exfor.to_dataframe(
                 energy=energy_mev,
                 energy_unit='MeV',
                 cross_section_unit='b/sr',
                 angle_unit='deg',
+                tolerance=1e-4,  # 0.1 keV tolerance
             )
 
             if df.empty:
@@ -499,6 +532,93 @@ def build_exfor_cache_from_objects(
 # EXFOR FILTERING FUNCTIONS
 # =============================================================================
 
+
+def _parse_exclusion_list(exclude_list: Optional[List[str]]) -> set:
+    """
+    Parse exclusion list into a set of normalized patterns for matching.
+
+    Accepts multiple formats:
+    - "20743" - excludes all subentries starting with 20743
+    - "20743002" - excludes specific dataset
+    - "20743/002" - same as above
+
+    Parameters
+    ----------
+    exclude_list : List[str], optional
+        List of experiment IDs to exclude
+
+    Returns
+    -------
+    set
+        Set of (entry_prefix, full_id) tuples for matching.
+        entry_prefix is for matching all subentries, full_id for exact match.
+    """
+    if not exclude_list:
+        return set()
+
+    patterns = set()
+    for item in exclude_list:
+        item = item.strip()
+        if not item:
+            continue
+
+        # Handle "entry/subentry" format
+        if "/" in item:
+            parts = item.split("/")
+            entry = parts[0].strip()
+            subentry = parts[1].strip() if len(parts) > 1 else ""
+            full_id = entry + subentry
+            patterns.add(full_id)
+        elif len(item) <= 5:
+            # Short ID - treat as entry prefix (matches all subentries)
+            patterns.add(("prefix", item))
+        else:
+            # Full dataset ID
+            patterns.add(item)
+
+    return patterns
+
+
+def _is_experiment_excluded(
+    entry: str,
+    subentry: str,
+    exclusion_patterns: set,
+) -> bool:
+    """
+    Check if an experiment matches any exclusion pattern.
+
+    Parameters
+    ----------
+    entry : str
+        EXFOR entry number (e.g., "20743")
+    subentry : str
+        EXFOR subentry number (e.g., "002")
+    exclusion_patterns : set
+        Set of patterns from _parse_exclusion_list()
+
+    Returns
+    -------
+    bool
+        True if experiment should be excluded
+    """
+    if not exclusion_patterns:
+        return False
+
+    # Build full dataset ID
+    full_id = entry + subentry
+
+    for pattern in exclusion_patterns:
+        if isinstance(pattern, tuple) and pattern[0] == "prefix":
+            # Prefix match - exclude all subentries of this entry
+            if full_id.startswith(pattern[1]):
+                return True
+        elif full_id == pattern:
+            # Exact match
+            return True
+
+    return False
+
+
 def filter_exfor_with_kernel_weights(
     exfor_cache: Dict[float, List[Tuple[pd.DataFrame, Dict]]],
     sorted_energies: List[float],
@@ -515,6 +635,9 @@ def filter_exfor_with_kernel_weights(
     default_flight_path_m: float = 27.037,
     use_overlap_weights: bool = True,
     normalize_by_n_points: bool = True,
+    dedupe_per_experiment: bool = True,
+    exclude_experiments: Optional[List[str]] = None,
+    min_relative_uncertainty: float = 0.0,
     logger = None,
 ) -> Tuple[pd.DataFrame, List[Dict], np.ndarray, KernelDiagnostics]:
     """
@@ -533,6 +656,11 @@ def filter_exfor_with_kernel_weights(
     Per-energy normalization (normalize_by_n_points=True):
        Divides weight by number of angular points at each energy
        to prevent experiments with many angles from dominating.
+
+    Per-experiment deduplication (dedupe_per_experiment=True):
+       If an experiment has multiple energies within the kernel range,
+       only the energy with the highest kernel weight is selected.
+       This prevents experiments with dense energy sampling from dominating.
 
     Parameters
     ----------
@@ -568,6 +696,19 @@ def filter_exfor_with_kernel_weights(
     normalize_by_n_points : bool
         If True, divide weight by number of angular points at each energy.
         This prevents experiments with dense angular sampling from dominating.
+    dedupe_per_experiment : bool
+        If True (default), select only the highest-weighted energy for each
+        experiment. This prevents experiments with many energies in range from
+        dominating the fit.
+    exclude_experiments : List[str], optional
+        List of experiments to exclude from filtering. Accepts multiple formats:
+        - "20743" - excludes all subentries starting with 20743
+        - "20743002" - excludes specific dataset
+        - "20743/002" - same as above
+    min_relative_uncertainty : float, optional
+        Minimum relative uncertainty as a fraction (default: 0.0 = disabled).
+        For example, 0.03 means 3% minimum uncertainty. This prevents experiments
+        with unrealistically small uncertainties from dominating the fit.
     logger : logging.Logger, optional
         Logger for reporting fallback usage
 
@@ -575,7 +716,7 @@ def filter_exfor_with_kernel_weights(
     -------
     Tuple[pd.DataFrame, List[Dict], np.ndarray, KernelDiagnostics]
         - DataFrame with EXFOR data including 'kernel_weight' column
-        - List of experiment metadata dicts
+        - List of experiment metadata dicts (includes 'selected_from_n_energies')
         - Array of kernel weights for each data point
         - KernelDiagnostics object with N_eff, weight span, etc.
     """
@@ -589,6 +730,9 @@ def filter_exfor_with_kernel_weights(
     if not exfor_cache or not sorted_energies:
         return pd.DataFrame(), [], np.array([]), empty_diag
 
+    # Parse exclusion patterns
+    exclusion_patterns = _parse_exclusion_list(exclude_experiments)
+
     all_frames = []
     experiments_info = []
     all_kernel_weights = []
@@ -596,14 +740,20 @@ def filter_exfor_with_kernel_weights(
     # Track experiments that used fallback (log once per experiment, not per energy)
     fallback_logged = set()
 
+    # Step 1: Collect all candidate data with computed kernel weights, grouped by experiment
+    # experiment_candidates: {(entry, subentry): [(energy, df, meta, kernel_weight, exp_sigma_E, used_fallback), ...]}
+    experiment_candidates: Dict[Tuple[str, str], List[Tuple[float, pd.DataFrame, Dict, float, float, bool]]] = defaultdict(list)
+
     for available_energy in sorted_energies:
         entries = exfor_cache.get(available_energy, [])
         for df, meta in entries:
             # Extract metadata
             entry = meta.get('entry', 'unknown')
             subentry = meta.get('subentry', 'unknown')
-            frame = meta.get('angle_frame', 'CM').upper()
-            reaction = meta.get('reaction', '')
+
+            # Check if experiment is excluded
+            if _is_experiment_excluded(entry, subentry, exclusion_patterns):
+                continue
 
             # Get experiment-specific TOF parameters for energy resolution
             energy_res = meta.get('energy_resolution_inputs')
@@ -627,11 +777,6 @@ def filter_exfor_with_kernel_weights(
                     flight_path_m=default_flight_path_m,
                 )
                 used_fallback = True
-                # Log fallback only once per experiment (subentry)
-                if logger and subentry not in fallback_logged:
-                    logger.info(f"  Using default TOF params for {subentry} "
-                               f"(delta_t={default_delta_t_ns}ns, L={default_flight_path_m}m)")
-                    fallback_logged.add(subentry)
 
             # Compute weight based on method
             if use_overlap_weights:
@@ -655,86 +800,116 @@ def filter_exfor_with_kernel_weights(
                 delta_E = abs(available_energy - energy_mev)
                 kernel_weight = np.exp(-0.5 * (delta_E / exp_sigma_E)**2)
 
-            citation = meta.get('citation', {})
-            authors = citation.get('authors', [])
-            author = authors[0] if authors else 'unknown'
-            year = citation.get('year', 'unknown')
+            exp_key = (entry, subentry)
+            experiment_candidates[exp_key].append((available_energy, df, meta, kernel_weight, exp_sigma_E, used_fallback))
 
-            # Extract columns
-            angles_deg = df['angle'].to_numpy(dtype=float)
-            dsig = df['dsig'].to_numpy(dtype=float)
-            error_stat = df['error_stat'].to_numpy(dtype=float)
+    # Step 2: For each experiment, select highest-weighted energy (or all if dedupe disabled)
+    selected_data: List[Tuple[float, pd.DataFrame, Dict, float, float, bool]] = []
 
-            n_points = len(angles_deg)
+    for exp_key, candidates in experiment_candidates.items():
+        if dedupe_per_experiment and len(candidates) > 1:
+            # Select the energy with highest kernel weight
+            best = max(candidates, key=lambda x: x[3])  # x[3] = kernel_weight
+            selected_data.append(best)
+        else:
+            selected_data.extend(candidates)
 
-            # Per-energy normalization (Upgrade 2)
-            # Divide weight by number of angular points to prevent
-            # experiments with dense angular sampling from dominating
-            if normalize_by_n_points and n_points > 0:
-                point_weight = kernel_weight / n_points
-            else:
-                point_weight = kernel_weight
+    # Step 3: Process selected data (transform and build DataFrames)
+    for available_energy, df, meta, kernel_weight, exp_sigma_E, used_fallback in selected_data:
+        # Extract metadata
+        entry = meta.get('entry', 'unknown')
+        subentry = meta.get('subentry', 'unknown')
+        frame = meta.get('angle_frame', 'CM').upper()
+        reaction = meta.get('reaction', '')
 
-            # Transform to CM frame if needed
-            if frame == 'LAB':
-                mu_lab = np.cos(np.deg2rad(angles_deg))
-                mu_cm, dsig_cm = transform_lab_to_cm(mu_lab, dsig, m_proj_u, m_targ_u)
+        # Log fallback only once per experiment (subentry)
+        if used_fallback and logger and subentry not in fallback_logged:
+            logger.info(f"  Using default TOF params for {subentry} "
+                       f"(delta_t={default_delta_t_ns}ns, L={default_flight_path_m}m)")
+            fallback_logged.add(subentry)
 
-                alpha = m_proj_u / m_targ_u
-                J = jacobian_cm_to_lab(mu_cm, alpha)
-                error_cm = error_stat / J
+        citation = meta.get('citation', {})
+        authors = citation.get('authors', [])
+        author = authors[0] if authors else 'unknown'
+        year = citation.get('year', 'unknown')
 
-                angles_cm_deg = np.rad2deg(np.arccos(mu_cm))
+        # Extract columns
+        angles_deg = df['angle'].to_numpy(dtype=float)
+        dsig = df['dsig'].to_numpy(dtype=float)
+        error_stat = df['error_stat'].to_numpy(dtype=float)
 
-                transformed_df = pd.DataFrame({
-                    'theta_deg': angles_cm_deg,
-                    'value': dsig_cm,
-                    'unc': error_cm,
-                    'mu': mu_cm,
-                    'frame': 'CM',
-                    'entry': entry,
-                    'subentry': subentry,
-                    'author': author,
-                    'year': year,
-                    'reaction': reaction,
-                    'exfor_energy_mev': available_energy,
-                    'kernel_weight': point_weight,  # Use normalized point weight
-                })
-            else:
-                mu_cm = np.cos(np.deg2rad(angles_deg))
+        n_points = len(angles_deg)
 
-                transformed_df = pd.DataFrame({
-                    'theta_deg': angles_deg,
-                    'value': dsig,
-                    'unc': error_stat,
-                    'mu': mu_cm,
-                    'frame': frame,
-                    'entry': entry,
-                    'subentry': subentry,
-                    'author': author,
-                    'year': year,
-                    'reaction': reaction,
-                    'exfor_energy_mev': available_energy,
-                    'kernel_weight': point_weight,  # Use normalized point weight
-                })
+        # Count how many energies this experiment had in range
+        n_energies_in_range = len(experiment_candidates[(entry, subentry)])
 
-            all_frames.append(transformed_df)
-            all_kernel_weights.extend([point_weight] * n_points)
+        # Per-energy normalization (Upgrade 2)
+        # Divide weight by number of angular points to prevent
+        # experiments with dense angular sampling from dominating
+        if normalize_by_n_points and n_points > 0:
+            point_weight = kernel_weight / n_points
+        else:
+            point_weight = kernel_weight
 
-            # Track experiment info (store original kernel_weight for diagnostics)
-            exp_info = {
+        # Transform to CM frame if needed
+        if frame == 'LAB':
+            mu_lab = np.cos(np.deg2rad(angles_deg))
+            mu_cm, dsig_cm, error_cm = transform_lab_to_cm(
+                mu_lab, dsig, error_stat, m_proj_u, m_targ_u
+            )
+
+            angles_cm_deg = np.rad2deg(np.arccos(mu_cm))
+
+            transformed_df = pd.DataFrame({
+                'theta_deg': angles_cm_deg,
+                'value': dsig_cm,
+                'unc': error_cm,
+                'mu': mu_cm,
+                'frame': 'CM',
                 'entry': entry,
                 'subentry': subentry,
                 'author': author,
                 'year': year,
+                'reaction': reaction,
                 'exfor_energy_mev': available_energy,
-                'kernel_weight': kernel_weight,  # Original weight before normalization
-                'point_weight': point_weight,    # Weight after per-energy normalization
-                'n_points': n_points,
-                'sigma_E_mev': exp_sigma_E,
-                'used_fallback_tof': used_fallback,
-            }
-            experiments_info.append(exp_info)
+                'kernel_weight': point_weight,  # Use normalized point weight
+            })
+        else:
+            mu_cm = np.cos(np.deg2rad(angles_deg))
+
+            transformed_df = pd.DataFrame({
+                'theta_deg': angles_deg,
+                'value': dsig,
+                'unc': error_stat,
+                'mu': mu_cm,
+                'frame': frame,
+                'entry': entry,
+                'subentry': subentry,
+                'author': author,
+                'year': year,
+                'reaction': reaction,
+                'exfor_energy_mev': available_energy,
+                'kernel_weight': point_weight,  # Use normalized point weight
+            })
+
+        all_frames.append(transformed_df)
+        all_kernel_weights.extend([point_weight] * n_points)
+
+        # Track experiment info (store original kernel_weight for diagnostics)
+        exp_info = {
+            'entry': entry,
+            'subentry': subentry,
+            'author': author,
+            'year': year,
+            'exfor_energy_mev': available_energy,
+            'kernel_weight': kernel_weight,  # Original weight before normalization
+            'point_weight': point_weight,    # Weight after per-energy normalization
+            'n_points': n_points,
+            'sigma_E_mev': exp_sigma_E,
+            'used_fallback_tof': used_fallback,
+            'selected_from_n_energies': n_energies_in_range,  # NEW: track deduplication
+        }
+        experiments_info.append(exp_info)
 
     if not all_frames:
         return pd.DataFrame(), [], np.array([]), empty_diag
@@ -742,6 +917,10 @@ def filter_exfor_with_kernel_weights(
     # Concatenate all experiments
     result = pd.concat(all_frames, ignore_index=True)
     kernel_weights = np.array(all_kernel_weights)
+
+    # Apply uncertainty floor if requested
+    if min_relative_uncertainty > 0:
+        result = apply_uncertainty_floor(result, min_relative_uncertainty, unc_column='unc', value_column='value')
 
     # Apply minimum weight threshold
     kernel_weights, n_dropped = apply_min_weight_threshold(
@@ -784,12 +963,16 @@ def filter_exfor_with_energy_bin(
     target_energy_mev: float,
     m_proj_u: float,
     m_targ_u: float,
+    dedupe_per_experiment: bool = True,
+    exclude_experiments: Optional[List[str]] = None,
+    min_relative_uncertainty: float = 0.0,
 ) -> Tuple[pd.DataFrame, List[Dict], np.ndarray, KernelDiagnostics]:
     """
     Filter EXFOR data using exact energy bin matching.
 
     Unlike Gaussian kernel weighting, this method:
     - Selects all experiments whose energy falls within [bin_lower, bin_upper]
+    - When dedupe_per_experiment=True, selects only the closest energy per experiment
     - Assigns uniform weight = 1.0 to all selected points
     - Does NOT apply per-experiment weight capping
 
@@ -809,12 +992,24 @@ def filter_exfor_with_energy_bin(
         Projectile mass in atomic mass units
     m_targ_u : float
         Target mass in atomic mass units
+    dedupe_per_experiment : bool
+        If True (default), select only the closest energy to target_energy_mev
+        for each experiment. This prevents experiments with many energies in
+        the bin from dominating the fit.
+    exclude_experiments : List[str], optional
+        List of experiments to exclude from filtering. Accepts multiple formats:
+        - "20743" - excludes all subentries starting with 20743
+        - "20743002" - excludes specific dataset
+        - "20743/002" - same as above
+    min_relative_uncertainty : float, optional
+        Minimum relative uncertainty as a fraction (default: 0.0 = disabled).
+        For example, 0.03 means 3% minimum uncertainty.
 
     Returns
     -------
     Tuple[pd.DataFrame, List[Dict], np.ndarray, KernelDiagnostics]
         - DataFrame with EXFOR data (kernel_weight = 1.0 for all)
-        - List of experiment metadata dicts
+        - List of experiment metadata dicts (includes 'selected_from_n_energies')
         - Array of kernel weights (all 1.0)
         - KernelDiagnostics object
     """
@@ -828,93 +1023,125 @@ def filter_exfor_with_energy_bin(
     if not exfor_cache or not sorted_energies:
         return pd.DataFrame(), [], np.array([]), empty_diag
 
+    # Parse exclusion patterns
+    exclusion_patterns = _parse_exclusion_list(exclude_experiments)
+
     all_frames = []
     experiments_info = []
+
+    # Step 1: Collect all candidate data grouped by experiment
+    # experiment_candidates: {(entry, subentry): [(energy, df, meta), ...]}
+    experiment_candidates: Dict[Tuple[str, str], List[Tuple[float, pd.DataFrame, Dict]]] = defaultdict(list)
 
     for available_energy in sorted_energies:
         # Exact bin matching - include if within [lower, upper]
         if available_energy < bin_lower_mev or available_energy > bin_upper_mev:
             continue
 
+        entries = exfor_cache.get(available_energy, [])
+        for df, meta in entries:
+            entry = meta.get('entry', 'unknown')
+            subentry = meta.get('subentry', 'unknown')
+
+            # Check if experiment is excluded
+            if _is_experiment_excluded(entry, subentry, exclusion_patterns):
+                continue
+
+            exp_key = (entry, subentry)
+            experiment_candidates[exp_key].append((available_energy, df, meta))
+
+    # Step 2: For each experiment, select closest energy to target (or all if dedupe disabled)
+    selected_data: List[Tuple[float, pd.DataFrame, Dict]] = []
+
+    for exp_key, candidates in experiment_candidates.items():
+        if dedupe_per_experiment and len(candidates) > 1:
+            # Select the energy closest to target
+            closest = min(candidates, key=lambda x: abs(x[0] - target_energy_mev))
+            selected_data.append(closest)
+        else:
+            selected_data.extend(candidates)
+
+    # Step 3: Process selected data (transform and build DataFrames)
+    for available_energy, df, meta in selected_data:
         # Uniform weight for bin method (no Gaussian decay)
         kernel_weight = 1.0
 
-        entries = exfor_cache.get(available_energy, [])
-        for df, meta in entries:
-            # Extract metadata (same as Gaussian kernel method)
-            entry = meta.get('entry', 'unknown')
-            subentry = meta.get('subentry', 'unknown')
-            frame = meta.get('angle_frame', 'CM').upper()
-            reaction = meta.get('reaction', '')
+        # Extract metadata (same as Gaussian kernel method)
+        entry = meta.get('entry', 'unknown')
+        subentry = meta.get('subentry', 'unknown')
+        frame = meta.get('angle_frame', 'CM').upper()
+        reaction = meta.get('reaction', '')
 
-            citation = meta.get('citation', {})
-            authors = citation.get('authors', [])
-            author = authors[0] if authors else 'unknown'
-            year = citation.get('year', 'unknown')
+        citation = meta.get('citation', {})
+        authors = citation.get('authors', [])
+        author = authors[0] if authors else 'unknown'
+        year = citation.get('year', 'unknown')
 
-            # Extract columns
-            angles_deg = df['angle'].to_numpy(dtype=float)
-            dsig = df['dsig'].to_numpy(dtype=float)
-            error_stat = df['error_stat'].to_numpy(dtype=float)
+        # Extract columns
+        angles_deg = df['angle'].to_numpy(dtype=float)
+        dsig = df['dsig'].to_numpy(dtype=float)
+        error_stat = df['error_stat'].to_numpy(dtype=float)
 
-            n_points = len(angles_deg)
+        n_points = len(angles_deg)
 
-            # Transform to CM frame if needed (same logic as Gaussian method)
-            if frame == 'LAB':
-                mu_lab = np.cos(np.deg2rad(angles_deg))
-                mu_cm, dsig_cm = transform_lab_to_cm(mu_lab, dsig, m_proj_u, m_targ_u)
+        # Count how many energies this experiment had in the bin
+        n_energies_in_bin = len(experiment_candidates[(entry, subentry)])
 
-                alpha = m_proj_u / m_targ_u
-                J = jacobian_cm_to_lab(mu_cm, alpha)
-                error_cm = error_stat / J
+        # Transform to CM frame if needed (same logic as Gaussian method)
+        if frame == 'LAB':
+            mu_lab = np.cos(np.deg2rad(angles_deg))
+            mu_cm, dsig_cm, error_cm = transform_lab_to_cm(
+                mu_lab, dsig, error_stat, m_proj_u, m_targ_u
+            )
 
-                angles_cm_deg = np.rad2deg(np.arccos(mu_cm))
+            angles_cm_deg = np.rad2deg(np.arccos(mu_cm))
 
-                transformed_df = pd.DataFrame({
-                    'theta_deg': angles_cm_deg,
-                    'value': dsig_cm,
-                    'unc': error_cm,
-                    'mu': mu_cm,
-                    'frame': 'CM',
-                    'entry': entry,
-                    'subentry': subentry,
-                    'author': author,
-                    'year': year,
-                    'reaction': reaction,
-                    'exfor_energy_mev': available_energy,
-                    'kernel_weight': kernel_weight,
-                })
-            else:
-                mu_cm = np.cos(np.deg2rad(angles_deg))
-
-                transformed_df = pd.DataFrame({
-                    'theta_deg': angles_deg,
-                    'value': dsig,
-                    'unc': error_stat,
-                    'mu': mu_cm,
-                    'frame': frame,
-                    'entry': entry,
-                    'subentry': subentry,
-                    'author': author,
-                    'year': year,
-                    'reaction': reaction,
-                    'exfor_energy_mev': available_energy,
-                    'kernel_weight': kernel_weight,
-                })
-
-            all_frames.append(transformed_df)
-
-            # Track experiment info
-            exp_info = {
+            transformed_df = pd.DataFrame({
+                'theta_deg': angles_cm_deg,
+                'value': dsig_cm,
+                'unc': error_cm,
+                'mu': mu_cm,
+                'frame': 'CM',
                 'entry': entry,
                 'subentry': subentry,
                 'author': author,
                 'year': year,
+                'reaction': reaction,
                 'exfor_energy_mev': available_energy,
                 'kernel_weight': kernel_weight,
-                'n_points': n_points,
-            }
-            experiments_info.append(exp_info)
+            })
+        else:
+            mu_cm = np.cos(np.deg2rad(angles_deg))
+
+            transformed_df = pd.DataFrame({
+                'theta_deg': angles_deg,
+                'value': dsig,
+                'unc': error_stat,
+                'mu': mu_cm,
+                'frame': frame,
+                'entry': entry,
+                'subentry': subentry,
+                'author': author,
+                'year': year,
+                'reaction': reaction,
+                'exfor_energy_mev': available_energy,
+                'kernel_weight': kernel_weight,
+            })
+
+        all_frames.append(transformed_df)
+
+        # Track experiment info with deduplication info
+        exp_info = {
+            'entry': entry,
+            'subentry': subentry,
+            'author': author,
+            'year': year,
+            'exfor_energy_mev': available_energy,
+            'kernel_weight': kernel_weight,
+            'n_points': n_points,
+            'selected_from_n_energies': n_energies_in_bin,  # NEW: track deduplication
+        }
+        experiments_info.append(exp_info)
 
     if not all_frames:
         return pd.DataFrame(), [], np.array([]), empty_diag
@@ -922,6 +1149,10 @@ def filter_exfor_with_energy_bin(
     # Concatenate all experiments
     result = pd.concat(all_frames, ignore_index=True)
     kernel_weights = np.ones(len(result), dtype=float)  # All weights = 1.0
+
+    # Apply uncertainty floor if requested
+    if min_relative_uncertainty > 0:
+        result = apply_uncertainty_floor(result, min_relative_uncertainty, unc_column='unc', value_column='value')
 
     # NO experiment capping for bin method
 
@@ -989,6 +1220,55 @@ def apply_min_weight_threshold(
     filtered[mask] = 0.0
 
     return filtered, int(np.sum(mask))
+
+
+def apply_uncertainty_floor(
+    exfor_df: pd.DataFrame,
+    min_relative_uncertainty: float = 0.0,
+    unc_column: str = "unc",
+    value_column: str = "value",
+) -> pd.DataFrame:
+    """
+    Apply minimum relative uncertainty floor to prevent experiments with
+    unrealistically small uncertainties from dominating fits.
+
+    For each data point, enforces: unc >= min_relative_uncertainty * |value|
+
+    This is a safety mechanism to handle cases where uncertainties may be
+    incorrectly reported or processed in the database.
+
+    Parameters
+    ----------
+    exfor_df : pd.DataFrame
+        EXFOR data with uncertainty and value columns
+    min_relative_uncertainty : float
+        Minimum relative uncertainty as a fraction (default: 0.0 = disabled).
+        For example, 0.03 means 3% minimum uncertainty.
+    unc_column : str
+        Column name for uncertainties (default: 'unc')
+    value_column : str
+        Column name for cross section values (default: 'value')
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of DataFrame with updated uncertainties (or original if disabled)
+
+    Examples
+    --------
+    >>> df = apply_uncertainty_floor(exfor_df, min_relative_uncertainty=0.03)
+    >>> # Now all points have at least 3% relative uncertainty
+    """
+    if min_relative_uncertainty <= 0:
+        return exfor_df
+
+    df = exfor_df.copy()
+    if unc_column not in df.columns or value_column not in df.columns:
+        return df
+
+    floor = min_relative_uncertainty * np.abs(df[value_column])
+    df[unc_column] = np.maximum(df[unc_column], floor)
+    return df
 
 
 def apply_per_experiment_weight_cap(
@@ -1256,6 +1536,19 @@ def compute_covariance_from_samples(
         - cov_matrix: Full covariance matrix
         - corr_matrix: Full correlation matrix
         - param_labels: List of (energy_index, order) tuples
+
+    Uncertainty Interpretation
+    --------------------------
+    The covariance matrix contains variances of ENDF-normalized Legendre
+    coefficients a_l = (c_l / c0) / (2l+1). Since these coefficients are
+    already normalized by the total cross section (c0), they are dimensionless
+    and the variances are inherently RELATIVE (fractional).
+
+    Example: If diag(cov)[k] = 0.0001, then std = 0.01 = 1% fractional uncertainty.
+
+    When written to MF34 with LB=5 format, these values are correctly interpreted
+    as relative covariances. The MF34 reader correctly identifies LB=5 data as
+    relative (is_relative=True) since LB=0 is the only absolute format.
     """
     n_samples = len(all_samples)
     n_energies = len(energy_indices)

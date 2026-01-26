@@ -127,6 +127,17 @@ def create_mf34_from_covariance(
     Only the upper triangle of (L, L1) pairs is stored since the covariance
     is symmetric: Cov(a_L, a_{L1}) = Cov(a_{L1}, a_L).
 
+    Covariance Interpretation
+    -------------------------
+    The input covariance matrix should contain variances of ENDF-normalized
+    Legendre coefficients: a_l = (c_l / c0) / (2l+1). Since these coefficients
+    are already normalized by the total cross section (c0), they are dimensionless
+    and the covariance values are inherently RELATIVE (fractional).
+
+    The LB=5 format is appropriate for this data. When read back via the MF34
+    parser, the covariance will correctly have is_relative=True, since LB=0
+    is the only format interpreted as absolute covariance.
+
     Examples
     --------
     Create MF34 for Fe-56 elastic scattering with 8 Legendre orders:

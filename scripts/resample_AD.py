@@ -608,7 +608,19 @@ def _weighted_ridge_fit(
     rhs = Aw.T @ yw
 
     # Solve for coefficients
-    coeffs = np.linalg.solve(M, rhs)
+    # Try direct solve first; fall back to lstsq for singular/ill-conditioned matrices
+    try:
+        coeffs = np.linalg.solve(M, rhs)
+    except np.linalg.LinAlgError:
+        # Matrix is singular - use least-squares solution instead
+        coeffs, _, rank, _ = np.linalg.lstsq(M, rhs, rcond=None)
+        import warnings
+        warnings.warn(
+            f"Matrix M is rank-deficient (rank={rank}/{M.shape[0]}) for degree={degree}. "
+            f"Using least-squares solution.",
+            RuntimeWarning,
+            stacklevel=2
+        )
 
     # Compute chi2 on original scale
     yhat = A @ coeffs
@@ -621,7 +633,11 @@ def _weighted_ridge_fit(
     else:
         # Effective parameters via trace(H), where H = A (A^T W A + λR)^-1 A^T W
         # We'll compute in weighted form: H = (Aw) M^-1 (Aw)^T
-        Minv = np.linalg.inv(M)
+        try:
+            Minv = np.linalg.inv(M)
+        except np.linalg.LinAlgError:
+            # Use pseudo-inverse for singular matrices
+            Minv = np.linalg.pinv(M)
         H = Aw @ Minv @ Aw.T
         eff_params = float(np.trace(H))
         dof = float(max(1e-12, n - eff_params))
@@ -745,8 +761,11 @@ def sample_legendre_coefficients(
     if n < 2:
         raise ValueError("Need at least 2 points to fit anything meaningful.")
 
-    # Choose degree
-    max_feasible = min(max_degree, n - 1)  # without regularization, this avoids underdetermined fits
+    # Choose degree based on number of UNIQUE mu values, not total points.
+    # The Legendre Vandermonde matrix has rank = n_unique_mu, so we need at least
+    # degree+1 unique angles to avoid a rank-deficient design matrix.
+    n_unique_mu = len(np.unique(np.round(mu, decimals=6)))  # Round to handle numerical noise
+    max_feasible = min(max_degree, n_unique_mu - 1)  # Need at least degree+1 unique angles
     if max_feasible < 0:
         max_feasible = 0
 
@@ -1437,15 +1456,12 @@ def load_exfor_for_fitting(
         # Transform to CM frame if needed
         if frame == 'LAB':
             mu_lab = np.cos(np.deg2rad(angles_deg))
-            mu_cm, dsig_cm = transform_lab_to_cm(mu_lab, dsig, m_proj_u, m_targ_u)
-            
-            # Transform uncertainties using Jacobian
-            alpha = m_proj_u / m_targ_u
-            J = jacobian_cm_to_lab(mu_cm, alpha)
-            error_cm = error_stat / J
-            
+            mu_cm, dsig_cm, error_cm = transform_lab_to_cm(
+                mu_lab, dsig, error_stat, m_proj_u, m_targ_u
+            )
+
             angles_cm_deg = np.rad2deg(np.arccos(mu_cm))
-            
+
             # Create transformed dataframe
             transformed_df = pd.DataFrame({
                 'theta_deg': angles_cm_deg,

@@ -28,7 +28,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Any, Union
 from multiprocessing import Pool
 from dataclasses import dataclass, field
 
@@ -98,113 +98,138 @@ import time
 # CONFIGURATION PARAMETERS - MODIFY THESE BEFORE RUNNING
 # =============================================================================
 
-# Input files
-ENDF_FILE = "/soft_snc/lib/endf/jeff40/neutrons/26-Fe-56g.txt"  # Reference ENDF file
-EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data/"      # Directory with EXFOR JSON files
+# -----------------------------------------------------------------------------
+# 1. INPUT/OUTPUT PATHS
+# -----------------------------------------------------------------------------
+# Reference ENDF file (source of energy grid and original Legendre coefficients)
+ENDF_FILE = "/soft_snc/lib/endf/jeff40/neutrons/26-Fe-56g.txt"
 
-# Database configuration (X4Pro SQLite database)
-EXFOR_DB_PATH = None  # Path to X4Pro database (None uses KIKA_X4PRO_DB_PATH env var or default)
-EXFOR_SOURCE = "database"  # Data source: "json", "database", "auto", or "both"
+# EXFOR JSON directory (for source="json" or "auto")
+EXFOR_DIRECTORY = "/share_snc/snc/JuanMonleon/EXFOR/data_v1/"
+
+# X4Pro SQLite database path (for source="database" or "auto")
+# Set to None to use KIKA_X4PRO_DB_PATH env variable or builtin default
+EXFOR_DB_PATH = '/share_snc/snc/JuanMonleon/EXFOR/x4_iron_angular.db'
+
+# Output directory (all generated files go here)
+OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/EXFOR_FIT_JEFF_V2_ENERGYBIN/"
+
+# -----------------------------------------------------------------------------
+# 2. DATA SOURCE CONFIGURATION
+# -----------------------------------------------------------------------------
+# Data source: "json", "database", "auto" (database + JSON fallback), or "both"
+EXFOR_SOURCE = "database"
+
 # Filter options for database queries
-TARGET_ZAID = 26056  # Target ZAID (e.g., 26056 for Fe-56)
-TARGET_PROJECTILE = "N"  # Projectile (N for neutrons)
+# Use list of ZAIDs to include both Fe-56 and natural iron (Fe-0) experiments
+# Natural iron is ~92% Fe-56 and has much more experimental coverage in 1-3 MeV range
+TARGET_ZAIDS = [26056, 26000]                    # Target ZAIDs: Fe-56 + natural iron
+TARGET_PROJECTILE = "N"                          # Projectile (N for neutrons)
 
 # Supplementary JSON files (for experiments not in database)
-# These files will be loaded in addition to the database data
+# These files will be loaded in addition to the main data source
 SUPPLEMENTARY_JSON_FILES = [
+    '/share_snc/snc/JuanMonleon/EXFOR/data_v1/27673002.json',
     # "C:/Users/Usuario/BaradDur/EXFOR/data_v1/data_v1/27673002.json",  # Gkatis (2025)
 ]
 
-# Output configuration
-OUTPUT_DIR = "/SCRATCH/users/monleon-de-la-jan/MCNPy_LIB/EXFOR_FIT_JEFF_V2/"  # Output directory
-N_SAMPLES = 10                                   # Number of ENDF samples to generate
+# -----------------------------------------------------------------------------
+# 3. OUTPUT GENERATION OPTIONS
+# -----------------------------------------------------------------------------
+GENERATE_NOMINAL_ENDF = True                     # Best-fit coefficients ENDF
+GENERATE_MC_MEAN_ENDF = True                     # MC mean coefficients ENDF
+GENERATE_SAMPLES_ENDF = False                    # Individual MC sample ENDFs
+GENERATE_COVARIANCE = True                      # Covariance matrix (.npy)
+GENERATE_MF34 = True                            # MF34 covariance section in ENDF
+N_SAMPLES = 10                                   # Number of MC samples
 
-# Energy range (in MeV)
-ENERGY_MIN_MEV = 1.0                             # Minimum energy
-ENERGY_MAX_MEV = 3.0                             # Maximum energy
+# -----------------------------------------------------------------------------
+# 4. GENERAL PARAMETERS (Apply to ALL methods)
+# -----------------------------------------------------------------------------
+# Energy range to process (in MeV)
+ENERGY_MIN_MEV = 1.0
+ENERGY_MAX_MEV = 3.0
 
-# MT reaction number to process
-MT_NUMBER = 2                                    # MT=2 is elastic scattering
-
-# Fitting parameters
-MAX_LEGENDRE_DEGREE = 8                          # Maximum Legendre order (capped at 8)
-SELECT_DEGREE = "aicc"                           # "aicc", "bic", or None (use max)
-RIDGE_LAMBDA = 0.0                               # Ridge regularization parameter
+# MT reaction number (2 = elastic scattering)
+MT_NUMBER = 2
 
 # Target isotope masses (for LAB->CM frame conversion)
-M_PROJ_U = 1.008665                              # Projectile mass (neutron)
-M_TARG_U = 55.93494                              # Target mass (e.g., Fe-56)
+M_PROJ_U = 1.008665                              # Projectile mass in u (neutron)
+M_TARG_U = 55.93494                              # Target mass in u (Fe-56)
 
-# TOF Energy Resolution Parameters
-DELTA_T_NS = 10.0                                # Time resolution in nanoseconds
+# Legendre fitting parameters
+MAX_LEGENDRE_DEGREE = 8                          # Maximum Legendre order (capped at 8)
+SELECT_DEGREE = "aicc"                           # "aicc", "bic", or None (use max)
+RIDGE_LAMBDA = 1e-6                              # Ridge regularization parameter
+
+# Processing options
+N_PROCS = 5                                      # Parallel processes (1 = sequential)
+BASE_SEED = 42                                   # Random seed for reproducibility
+
+# -----------------------------------------------------------------------------
+# 5. EXPERIMENT SELECTION METHOD
+# -----------------------------------------------------------------------------
+# Available methods:
+#
+# "global_convolution" (RECOMMENDED)
+#     Fits ALL energy points simultaneously using Tikhonov regularization.
+#     Properly accounts for energy resolution smearing across energy bins.
+#     Each EXFOR measurement contributes to multiple ENDF energies according
+#     to its resolution-weighted probability. Enforces smooth energy dependence.
+#     --> Uses parameters from section 6a (TOF Resolution) and 6b (Global Convolution)
+#
+# "kernel_weights"
+#     Fits each ENDF energy point independently using Gaussian kernel weighting.
+#     EXFOR data are weighted by g_ij = exp(-0.5 * ((E_i - E_j)/σE)²)
+#     --> Uses parameters from sections 6a, 6c, 6d, 6e, 6f
+#
+# "energy_bin"
+#     Simple energy binning without resolution-based weighting.
+#     Uses hard bin boundaries (no Gaussian weighting).
+#     Fastest but ignores energy resolution effects.
+#     --> Uses parameters from sections 6d, 6e, 6f
+#
+EXPERIMENT_SELECTION_METHOD = "energy_bin"
+
+# --- Experiment Exclusion and Uncertainty Floor ---
+# Experiments to exclude from fitting (e.g., experiments with known issues)
+# Accepts formats: "20743" (all subentries), "20743002", or "20743/002"
+EXCLUDE_EXPERIMENTS = ["20743002"]  # e.g., ["20743002"] to exclude Cierjacks (1978)
+
+# Minimum relative uncertainty floor (prevents unrealistically small errors from dominating)
+# Set to 0.0 to disable. e.g., 0.03 for 3% minimum uncertainty
+MIN_RELATIVE_UNCERTAINTY = 0.03
+
+# -----------------------------------------------------------------------------
+# 6. METHOD-SPECIFIC PARAMETERS
+# -----------------------------------------------------------------------------
+
+# --- 6a. TOF Energy Resolution (kernel_weights, global_convolution) ---
+DELTA_T_NS = 5.0                                 # Time resolution in nanoseconds
 FLIGHT_PATH_M = 27.037                           # Flight path in meters
 N_SIGMA_CUTOFF = 3.0                             # Gaussian kernel cutoff (±n_sigma * σE)
 
-# Angular-Band Discrepancy Parameters
+# --- 6b. Global Convolution (EXPERIMENT_SELECTION_METHOD = "global_convolution") ---
+GLOBAL_CONV_LAMBDA = 0.001                       # Tikhonov regularization strength
+
+# --- 6c. Kernel Weight Control (EXPERIMENT_SELECTION_METHOD = "kernel_weights") ---
+MIN_KERNEL_WEIGHT_FRACTION = 1e-3                # Minimum weight threshold
+MAX_EXPERIMENT_WEIGHT_FRACTION = 0.5             # Weight cap per experiment
+N_EFF_WARNING_THRESHOLD = 5.0                    # Warning if N_eff < threshold
+WEIGHT_SPAN_WARNING_RATIO = 3.0                  # Warning if span > ratio * σE
+
+# --- 6d. Angular-Band Discrepancy (kernel_weights, energy_bin) ---
 USE_BAND_DISCREPANCY = True                      # Use band-based uncertainty (vs global Birge)
-MIN_POINTS_PER_BAND = 6                          # Minimum points to estimate τ_b per band
+MIN_POINTS_PER_BAND = 3                          # Minimum points to estimate τ_b per band
 MAX_TAU_FRACTION = 0.25                          # Cap τ_b at 25% of cross section
 TAU_SMOOTHING_WINDOW = 3                         # Moving median window for τ_b(E) smoothing
 
-# Per-Experiment Normalization Uncertainty
+# --- 6e. Per-Experiment Normalization (kernel_weights, energy_bin) ---
 NORMALIZATION_SIGMA = 0.05                       # Per-experiment normalization uncertainty (5%)
 
-# Model Averaging Parameters
-MIN_DEGREE_FOR_AVERAGING = 1                     # Minimum Legendre degree to consider (1 = include all)
+# --- 6f. Model Averaging (kernel_weights, energy_bin) ---
 USE_MODEL_AVERAGING = True                       # Enable model averaging over Legendre orders
-
-# Parallel processing
-N_PROCS = 5                                      # Number of parallel processes (1 = sequential)
-
-# Random seed for reproducibility
-BASE_SEED = 42                                   # Base random seed
-
-# =============================================================================
-# OUTPUT GENERATION OPTIONS - SELECT WHICH OUTPUTS TO GENERATE
-# =============================================================================
-GENERATE_NOMINAL_ENDF = True
-GENERATE_MC_MEAN_ENDF = True
-GENERATE_SAMPLES_ENDF = True
-GENERATE_COVARIANCE = True
-GENERATE_MF34 = False
-
-# =============================================================================
-# KERNEL DIAGNOSTICS AND WEIGHT CONTROL PARAMETERS
-# =============================================================================
-MIN_KERNEL_WEIGHT_FRACTION = 1e-3
-MAX_EXPERIMENT_WEIGHT_FRACTION = 0.5
-N_EFF_WARNING_THRESHOLD = 5.0
-WEIGHT_SPAN_WARNING_RATIO = 3.0
-
-# =============================================================================
-# GLOBAL CONVOLUTION PARAMETERS
-# =============================================================================
-GLOBAL_CONV_LAMBDA = 0.001
-
-# =============================================================================
-# EXPERIMENT SELECTION METHOD
-# =============================================================================
-# Available methods:
-#
-# 1. "global_convolution" (RECOMMENDED)
-#    Fits ALL energy points simultaneously using Tikhonov regularization.
-#    Properly accounts for energy resolution smearing across energy bins.
-#    Each EXFOR measurement contributes to multiple ENDF energies according
-#    to its resolution-weighted probability. Enforces smooth energy dependence.
-#    Uses GLOBAL_CONV_LAMBDA for regularization strength.
-#
-# 2. "kernel_weights"
-#    Fits each ENDF energy point independently using Gaussian kernel weighting.
-#    EXFOR data are weighted by g_ij = exp(-0.5 * ((E_i - E_j)/σE)²)
-#    Uses N_SIGMA_CUTOFF to limit the energy window (±N_SIGMA_CUTOFF * σE).
-#    Good for debugging or when global smoothing is not desired.
-#
-# 3. "energy_bin"
-#    Simple energy binning without resolution-based weighting.
-#    Uses hard bin boundaries (no Gaussian weighting).
-#    Fastest but ignores energy resolution effects.
-#
-EXPERIMENT_SELECTION_METHOD = "global_convolution"
+MIN_DEGREE_FOR_AVERAGING = 1                     # Minimum degree to consider (1 = include all)
 
 # =============================================================================
 # END OF CONFIGURATION
@@ -233,6 +258,7 @@ class NominalFitResult:
     tau_info: Dict[str, float]
     chi2_red: float
     has_data: bool = True
+    interpolated: bool = False  # Whether coefficients were interpolated from neighbors
     kernel_diagnostics: Optional[KernelDiagnostics] = None
     degree_weights: Optional[Dict[int, float]] = None
     all_degrees_info: Optional[Dict[int, Dict]] = None
@@ -240,6 +266,257 @@ class NominalFitResult:
 
 # Import the rest of the workflow functions from the original script
 # These are the same as the original - just need to update the MF34 calls
+
+
+def interpolate_missing_nominal_fits(
+    nominal_results: List[NominalFitResult],
+    logger=None,
+) -> List[NominalFitResult]:
+    """
+    Interpolate coefficients for bins where EXFOR data was not available.
+
+    IMPORTANT: This ensures we NEVER use original ENDF coefficients as fallback,
+    which would compromise the independence of the evaluation.
+
+    Uses linear interpolation in energy space between neighboring bins
+    that have valid EXFOR data.
+
+    Parameters
+    ----------
+    nominal_results : List[NominalFitResult]
+        List of nominal fit results (some may have has_data=False)
+    logger : optional
+        Logger instance
+
+    Returns
+    -------
+    List[NominalFitResult]
+        Updated results with interpolated coefficients for missing bins
+    """
+    # Find indices with and without data
+    valid_indices = []
+    missing_indices = []
+
+    for i, result in enumerate(nominal_results):
+        if result.has_data:
+            valid_indices.append(i)
+        else:
+            missing_indices.append(i)
+
+    if not missing_indices:
+        return nominal_results
+
+    if len(valid_indices) < 2:
+        if logger:
+            logger.error(
+                "CRITICAL: Not enough bins with EXFOR data for interpolation. "
+                "Cannot proceed without at least 2 bins with data."
+            )
+            logger.error(
+                "  -> Energy bins without EXFOR data will have ISOTROPIC (a0=1) coefficients."
+            )
+            logger.error(
+                "  -> These bins should be excluded from final evaluation or data coverage improved."
+            )
+        # Set isotropic for missing bins rather than using original ENDF
+        for miss_idx in missing_indices:
+            nominal_results[miss_idx].nominal_coeffs = np.array([1.0])
+            nominal_results[miss_idx].frozen_degree = 0
+        return nominal_results
+
+    # Get energies and coefficient arrays for valid bins
+    valid_energies = np.array([nominal_results[i].energy_mev for i in valid_indices])
+
+    # Determine max coefficient length across all valid bins
+    max_n_coeffs = max(len(nominal_results[i].nominal_coeffs) for i in valid_indices)
+
+    # Pad coefficient arrays to same size
+    valid_coeffs = []
+    for i in valid_indices:
+        coeffs = nominal_results[i].nominal_coeffs
+        if len(coeffs) < max_n_coeffs:
+            padded = np.zeros(max_n_coeffs, dtype=float)
+            padded[:len(coeffs)] = coeffs
+            valid_coeffs.append(padded)
+        else:
+            valid_coeffs.append(coeffs)
+    valid_coeffs = np.array(valid_coeffs)  # Shape: (n_valid, n_coeffs)
+
+    # Also get frozen degrees for interpolation (round to nearest integer)
+    valid_degrees = np.array([nominal_results[i].frozen_degree for i in valid_indices])
+
+    # Interpolate for each missing bin
+    n_interpolated = 0
+    n_extrapolated = 0
+
+    for miss_idx in missing_indices:
+        miss_energy = nominal_results[miss_idx].energy_mev
+
+        # Check if energy is within interpolation range
+        if miss_energy < valid_energies.min():
+            # Extrapolate below - use lowest valid bin's values
+            if logger:
+                logger.warning(
+                    f"E={miss_energy:.4f} MeV: Below EXFOR data range [{valid_energies.min():.4f} MeV] "
+                    f"- extrapolating from lowest valid bin"
+                )
+            # Use nearest (lowest energy with data)
+            nearest_idx = valid_indices[0]
+            nominal_results[miss_idx].nominal_coeffs = nominal_results[nearest_idx].nominal_coeffs.copy()
+            nominal_results[miss_idx].frozen_degree = nominal_results[nearest_idx].frozen_degree
+            nominal_results[miss_idx].interpolated = True
+            nominal_results[miss_idx].has_data = True  # Mark as having data (interpolated)
+            n_extrapolated += 1
+            continue
+
+        if miss_energy > valid_energies.max():
+            # Extrapolate above - use highest valid bin's values
+            if logger:
+                logger.warning(
+                    f"E={miss_energy:.4f} MeV: Above EXFOR data range [{valid_energies.max():.4f} MeV] "
+                    f"- extrapolating from highest valid bin"
+                )
+            # Use nearest (highest energy with data)
+            nearest_idx = valid_indices[-1]
+            nominal_results[miss_idx].nominal_coeffs = nominal_results[nearest_idx].nominal_coeffs.copy()
+            nominal_results[miss_idx].frozen_degree = nominal_results[nearest_idx].frozen_degree
+            nominal_results[miss_idx].interpolated = True
+            nominal_results[miss_idx].has_data = True  # Mark as having data (interpolated)
+            n_extrapolated += 1
+            continue
+
+        # Interpolate each coefficient
+        interp_coeffs = np.zeros(max_n_coeffs, dtype=float)
+        for coeff_idx in range(max_n_coeffs):
+            y_vals = valid_coeffs[:, coeff_idx]
+            interp_coeffs[coeff_idx] = np.interp(miss_energy, valid_energies, y_vals)
+
+        # Interpolate degree (round to nearest integer)
+        interp_degree = int(round(np.interp(miss_energy, valid_energies, valid_degrees.astype(float))))
+
+        nominal_results[miss_idx].nominal_coeffs = interp_coeffs
+        nominal_results[miss_idx].frozen_degree = interp_degree
+        nominal_results[miss_idx].interpolated = True
+        nominal_results[miss_idx].has_data = True  # Mark as having data (interpolated)
+        n_interpolated += 1
+
+        if logger:
+            logger.info(
+                f"E={miss_energy:.4f} MeV: INTERPOLATED from neighboring bins (L={interp_degree})"
+            )
+
+    if logger:
+        logger.info("")
+        logger.info("[INTERPOLATION SUMMARY]")
+        logger.info(f"  Bins with EXFOR data: {len(valid_indices)}")
+        logger.info(f"  Bins interpolated: {n_interpolated}")
+        logger.info(f"  Bins extrapolated: {n_extrapolated}")
+        if n_extrapolated > 0:
+            logger.warning(
+                f"  WARNING: {n_extrapolated} bins were extrapolated outside EXFOR data range. "
+                f"Consider expanding energy range or improving data coverage."
+            )
+
+    return nominal_results
+
+
+def log_experiments_summary(
+    nominal_results: List[NominalFitResult],
+    logger=None,
+) -> None:
+    """
+    Log a summary of all EXFOR experiments used across all energy bins.
+
+    This provides a quick overview of data sources used in the evaluation.
+
+    Parameters
+    ----------
+    nominal_results : List[NominalFitResult]
+        List of nominal fit results
+    logger : optional
+        Logger instance
+    """
+    from collections import defaultdict
+
+    if not logger:
+        return
+
+    # Aggregate experiments across all energy bins
+    experiment_totals = defaultdict(lambda: {
+        'author': '',
+        'year': '',
+        'n_energies': 0,
+        'total_points': 0,
+        'energy_min': float('inf'),
+        'energy_max': float('-inf'),
+    })
+
+    for nr in nominal_results:
+        if not nr.has_data or nr.interpolated:
+            continue  # Skip interpolated bins - they don't contribute new data
+
+        for exp in nr.experiments_info:
+            key = (exp['entry'], exp['subentry'])
+            experiment_totals[key]['author'] = exp.get('author', 'Unknown')
+            experiment_totals[key]['year'] = exp.get('year', '????')
+            experiment_totals[key]['n_energies'] += 1
+            experiment_totals[key]['total_points'] += exp.get('n_points', 0)
+
+            exp_energy = exp.get('exfor_energy_mev', nr.energy_mev)
+            if exp_energy < experiment_totals[key]['energy_min']:
+                experiment_totals[key]['energy_min'] = exp_energy
+            if exp_energy > experiment_totals[key]['energy_max']:
+                experiment_totals[key]['energy_max'] = exp_energy
+
+    if not experiment_totals:
+        logger.info("[EXPERIMENTS USED - SUMMARY]")
+        logger.info("  No experiments found (all bins interpolated or no data)")
+        return
+
+    # Sort by total points (descending)
+    sorted_experiments = sorted(
+        experiment_totals.items(),
+        key=lambda x: x[1]['total_points'],
+        reverse=True
+    )
+
+    # Calculate totals
+    total_experiments = len(sorted_experiments)
+    total_points = sum(exp['total_points'] for _, exp in sorted_experiments)
+    total_energy_bins = sum(1 for nr in nominal_results if nr.has_data and not nr.interpolated)
+
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("[EXPERIMENTS USED - SUMMARY]")
+    logger.info("=" * 80)
+    logger.info(f"  Total experiments: {total_experiments}")
+    logger.info(f"  Total data points: {total_points}")
+    logger.info(f"  Energy bins with EXFOR data: {total_energy_bins}")
+    logger.info("")
+    logger.info("  Experiment details (sorted by total points):")
+    logger.info("  " + "-" * 76)
+    logger.info(f"  {'Entry.Sub':<12} {'Author':<20} {'Year':<6} {'Energies':<10} {'Points':<8} {'E range (MeV)'}")
+    logger.info("  " + "-" * 76)
+
+    for (entry, subentry), data in sorted_experiments:
+        exp_id = f"{entry}.{subentry}"
+        author = data['author'][:18] if len(data['author']) > 18 else data['author']
+        year = str(data['year'])
+        n_energies = data['n_energies']
+        total_pts = data['total_points']
+
+        if data['energy_min'] == data['energy_max']:
+            e_range = f"{data['energy_min']:.4f}"
+        else:
+            e_range = f"{data['energy_min']:.4f}-{data['energy_max']:.4f}"
+
+        logger.info(f"  {exp_id:<12} {author:<20} {year:<6} {n_energies:<10} {total_pts:<8} {e_range}")
+
+    logger.info("  " + "-" * 76)
+    logger.info(f"  {'TOTAL':<12} {'':<20} {'':<6} {'':<10} {total_points:<8}")
+    logger.info("=" * 80)
+    logger.info("")
+
 
 def perform_nominal_fits(
     energy_bins: List[EnergyBinInfo],
@@ -264,6 +541,8 @@ def perform_nominal_fits(
     delta_t_ns: float = 10.0,
     flight_path_m: float = 27.037,
     tikhonov_lambda: float = 0.001,
+    exclude_experiments: Optional[List[str]] = None,
+    min_relative_uncertainty: float = 0.0,
     logger = None,
 ) -> List[NominalFitResult]:
     """Phase 1: Perform nominal fits to determine frozen orders and band discrepancies."""
@@ -275,9 +554,14 @@ def perform_nominal_fits(
     # GLOBAL CONVOLUTION METHOD
     if experiment_selection_method == "global_convolution":
         if logger:
-            logger.info("Using GLOBAL CONVOLUTION method")
-            logger.info(f"  Tikhonov lambda: {tikhonov_lambda}")
+            logger.info("")
+            logger.info("[GLOBAL CONVOLUTION FIT]")
+            logger.info(f"  Method: global_convolution (all energies fitted simultaneously)")
+            logger.info(f"  Tikhonov λ: {tikhonov_lambda}")
             logger.info(f"  Max Legendre degree: {max_degree}")
+            logger.info(f"  Energy kernel cutoff: ±{n_sigma}σ")
+            logger.info(f"  Min weight fraction: {min_kernel_weight_fraction}")
+            logger.info("")
 
         coeffs_by_energy, global_diag = fit_legendre_global_convolution(
             exfor_cache=exfor_cache,
@@ -347,8 +631,26 @@ def perform_nominal_fits(
 
         if logger:
             n_with_data = len(global_diag.energies_with_data)
-            logger.info(f"Global fit complete: {n_with_data}/{len(energy_bins)} energies have data")
-            logger.info(f"Total chi² = {global_diag.chi2:.2f}")
+            logger.info("[GLOBAL FIT SUMMARY]")
+            logger.info(f"  Energies with data: {n_with_data}/{len(energy_bins)}")
+            logger.info(f"  Total χ² = {global_diag.chi2:.2f}")
+            if hasattr(global_diag, 'n_eff_total') and global_diag.n_eff_total:
+                logger.info(f"  Total N_eff = {global_diag.n_eff_total:.1f}")
+            if hasattr(global_diag, 'n_points_total') and global_diag.n_points_total:
+                logger.info(f"  Total data points = {global_diag.n_points_total}")
+            logger.info("")
+            # Log per-energy results in condensed form
+            logger.info("  Per-energy results:")
+            for bin_info in energy_bins:
+                if bin_info.index in coeffs_by_energy:
+                    chi2_e = global_diag.chi2_per_energy.get(bin_info.index, 0.0)
+                    n_eff_e = global_diag.n_eff_per_energy.get(bin_info.index, 0.0)
+                    logger.info(
+                        f"    E={bin_info.energy_mev:.4f} MeV: χ²/dof={chi2_e:.2f}, N_eff={n_eff_e:.1f}"
+                    )
+                else:
+                    logger.info(f"    E={bin_info.energy_mev:.4f} MeV: No data")
+            logger.info("")
 
         return results
 
@@ -363,6 +665,9 @@ def perform_nominal_fits(
                 target_energy_mev=bin_info.energy_mev,
                 m_proj_u=m_proj_u,
                 m_targ_u=m_targ_u,
+                dedupe_per_experiment=True,
+                exclude_experiments=exclude_experiments,
+                min_relative_uncertainty=min_relative_uncertainty,
             )
         else:
             exfor_df, experiments_info, kernel_weights, diagnostics = filter_exfor_with_kernel_weights(
@@ -381,6 +686,9 @@ def perform_nominal_fits(
                 default_flight_path_m=flight_path_m,
                 use_overlap_weights=False,
                 normalize_by_n_points=False,
+                dedupe_per_experiment=True,
+                exclude_experiments=exclude_experiments,
+                min_relative_uncertainty=min_relative_uncertainty,
                 logger=logger,
             )
 
@@ -503,11 +811,31 @@ def perform_nominal_fits(
             all_degrees_info=all_degrees_info,
         ))
 
+        # Log comprehensive energy bin information
         if logger:
+            # Energy header with bin boundaries or σE depending on method
+            if experiment_selection_method == "energy_bin":
+                logger.info(
+                    f"E = {bin_info.energy_mev:.4f} MeV (bin: [{bin_info.bin_lower_mev:.4f}, {bin_info.bin_upper_mev:.4f}] MeV):"
+                )
+            else:
+                logger.info(
+                    f"E = {bin_info.energy_mev:.4f} MeV (σE = {bin_info.sigma_E_mev:.4f} MeV):"
+                )
+
+            # Experiments used (condensed - one line per experiment with ranges)
+            condensed_lines = _format_condensed_experiments(experiments_info)
+            for line in condensed_lines:
+                logger.info(line)
+
+            # Fit results
             logger.info(
-                f"E={bin_info.energy_mev:.4f} MeV: L={frozen_degree}, χ²/dof={chi2_red:.2f}, "
-                f"{len(exfor_df)} pts, N_eff={final_n_eff:.1f}, τ=[{tau_F:.3f},{tau_M:.3f},{tau_B:.3f}]"
+                f"  Fit: L={frozen_degree}, χ²/dof={chi2_red:.2f}, {len(exfor_df)} pts, N_eff={final_n_eff:.1f}"
             )
+            logger.info(
+                f"  τ values: τ_F={tau_F:.4f}, τ_M={tau_M:.4f}, τ_B={tau_B:.4f}"
+            )
+            logger.info("")  # Blank line between bins
 
     if tau_smoothing_window > 1 and use_band_discrepancy:
         tau_by_energy = {r.energy_mev: r.tau_info for r in results if r.has_data}
@@ -532,11 +860,12 @@ def load_exfor_with_new_api(
     exfor_directory: str = None,
     db_path: str = None,
     source: str = "auto",
-    target_zaid: int = None,
+    target_zaid: Union[int, List[int]] = None,
     projectile: str = "N",
     mt: int = None,
     energy_range: tuple = None,
     supplementary_json_files: List[str] = None,
+    exclude_experiments: Optional[List[str]] = None,
     logger=None,
 ):
     """
@@ -555,8 +884,10 @@ def load_exfor_with_new_api(
         Path to X4Pro database. Uses KIKA_X4PRO_DB_PATH env var if None.
     source : str, optional
         Data source: "json", "database", "auto" (default), or "both"
-    target_zaid : int, optional
-        Target ZAID for database queries (e.g., 26056 for Fe-56)
+    target_zaid : int or List[int], optional
+        Target ZAID(s) for database queries. Can be:
+        - Single ZAID (e.g., 26056 for Fe-56)
+        - List of ZAIDs (e.g., [26056, 26000] for Fe-56 + natural iron)
     projectile : str, optional
         Projectile for database queries (default: "N")
     mt : int, optional
@@ -581,14 +912,17 @@ def load_exfor_with_new_api(
         if source in ("database", "auto", "both"):
             logger.info(f"  Database path: {db_path or 'default (env var or builtin)'}")
             if target_zaid:
-                logger.info(f"  Target ZAID: {target_zaid}")
+                if isinstance(target_zaid, list):
+                    logger.info(f"  Target ZAIDs: {target_zaid}")
+                else:
+                    logger.info(f"  Target ZAID: {target_zaid}")
         if supplementary_json_files:
             logger.info(f"  Supplementary JSON files: {len(supplementary_json_files)}")
             for f in supplementary_json_files:
                 logger.info(f"    - {f}")
 
     # Load with new API - get all objects by identifier
-    exfor_dict = read_all_exfor(
+    exfor_dict, load_status = read_all_exfor(
         directory=exfor_directory,
         group_by_energy=False,
         source=source,
@@ -598,6 +932,8 @@ def load_exfor_with_new_api(
         mt=mt,
         energy_range=energy_range,
         supplementary_json_files=supplementary_json_files,
+        exclude_experiments=exclude_experiments,
+        return_load_status=True,
     )
 
     # Extract list of ExforAngularDistribution objects
@@ -606,8 +942,21 @@ def load_exfor_with_new_api(
     if logger:
         logger.info(f"  Loaded {len(exfor_objects)} EXFOR datasets")
 
+        # Log supplementary file load results
+        if supplementary_json_files:
+            logger.info("  Supplementary file load results:")
+            for item in load_status.get('loaded', []):
+                logger.info(f"    LOADED: {item['id']} ({item.get('label', 'unknown')}, {item['n_energies']} energies)")
+            for item in load_status.get('skipped', []):
+                logger.warning(f"    SKIPPED: {item['id']} - {item['reason']}")
+            for item in load_status.get('failed', []):
+                logger.warning(f"    FAILED: {item['file']} - {item['error']}")
+
     # Convert to legacy format using build_exfor_cache_from_objects
-    exfor_cache, sorted_energies = build_exfor_cache_from_objects(exfor_objects)
+    exfor_cache, sorted_energies = build_exfor_cache_from_objects(
+        exfor_objects,
+        exclude_experiments=exclude_experiments,
+    )
 
     return exfor_cache, sorted_energies
 
@@ -651,9 +1000,12 @@ def run_exfor_to_endf_sampling_v2(
     # Database configuration (new parameters)
     exfor_db_path: str = None,
     exfor_source: str = "auto",
-    target_zaid: int = None,
+    target_zaid: Union[int, List[int]] = None,
     target_projectile: str = "N",
     supplementary_json_files: List[str] = None,
+    # Experiment exclusion and uncertainty floor
+    exclude_experiments: Optional[List[str]] = None,
+    min_relative_uncertainty: float = 0.0,
 ):
     """
     Main function to generate ENDF samples from EXFOR angular distribution data.
@@ -705,14 +1057,126 @@ def run_exfor_to_endf_sampling_v2(
     print(f"[INFO] Starting EXFOR-to-ENDF sampling (v2)")
     print(f"[INFO] Log file: {log_file}")
 
-    # Log methodology
+    # Log comprehensive methodology
     _logger.info("[METHODOLOGY]")
     _logger.info("")
-    _logger.info("API Version:")
-    _logger.info("  - EXFOR Loading: kika.exfor.read_all_exfor (NEW)")
-    _logger.info("  - Frame transforms: kika.exfor.transforms")
-    _logger.info("  - MF34 creation: kika.endf.writers.create_mf34_from_covariance (NEW)")
+    _logger.info("  API Version:")
+    _logger.info("    - EXFOR Loading: kika.exfor.read_all_exfor (NEW)")
+    _logger.info("    - Frame transforms: kika.exfor.transforms")
+    _logger.info("    - MF34 creation: kika.endf.writers.create_mf34_from_covariance (NEW)")
     _logger.info("")
+
+    # Experiment selection method documentation
+    _logger.info("  Experiment Selection Method:")
+    if experiment_selection_method == "global_convolution":
+        _logger.info("    - Method: GLOBAL CONVOLUTION (Tikhonov regularization)")
+        _logger.info("      Fits ALL energy points simultaneously using a global optimization")
+        _logger.info("      that properly accounts for energy resolution smearing.")
+        _logger.info(f"    - Tikhonov λ: {tikhonov_lambda}")
+        _logger.info(f"    - Energy kernel: Gaussian with σE from TOF resolution")
+    elif experiment_selection_method == "kernel_weights":
+        _logger.info("    - Method: KERNEL WEIGHTS (Gaussian weighting)")
+        _logger.info("      Each ENDF energy fitted independently with EXFOR points weighted")
+        _logger.info("      by Gaussian kernel: g_ij = exp(-0.5 * ((E_i - E_j)/σE)²)")
+        _logger.info(f"    - Kernel cutoff: ±{n_sigma_cutoff}σ")
+        _logger.info(f"    - Min weight fraction: {min_kernel_weight_fraction}")
+        _logger.info(f"    - Max experiment weight fraction: {max_experiment_weight_fraction}")
+    else:  # energy_bin
+        _logger.info("    - Method: ENERGY BIN MATCHING")
+        _logger.info("      Experiments selected if their energy falls within bin boundaries.")
+        _logger.info("      Bin boundaries: midpoints between ENDF grid energies.")
+        _logger.info("      Weights: uniform (all points within bin get weight = 1.0)")
+    _logger.info("")
+
+    # TOF resolution parameters
+    if experiment_selection_method in ("kernel_weights", "global_convolution"):
+        _logger.info("  TOF Energy Resolution Parameters:")
+        _logger.info(f"    - Time resolution (Δt): {delta_t_ns} ns")
+        _logger.info(f"    - Flight path (L): {flight_path_m} m")
+        _logger.info(f"    - σE calculation: σE = 2E × (Δt/t) where t = L/v")
+        _logger.info("")
+
+    # Angular-band discrepancy model
+    if use_band_discrepancy:
+        _logger.info("  Angular-Band Discrepancy Model:")
+        _logger.info("    Used to account for systematic differences between experiments")
+        _logger.info("    that vary with scattering angle region:")
+        _logger.info("    - Forward band (τ_F):  μ > 0.5  (θ < 60°)")
+        _logger.info("    - Mid band (τ_M):      |μ| ≤ 0.5 (60° ≤ θ ≤ 120°)")
+        _logger.info("    - Backward band (τ_B): μ < -0.5 (θ > 120°)")
+        _logger.info(f"    - Min points per band: {min_points_per_band}")
+        _logger.info(f"    - Max τ fraction: {max_tau_fraction} (25% cap)")
+        _logger.info(f"    - τ smoothing window: {tau_smoothing_window} energy bins")
+        _logger.info("")
+
+    # Legendre fitting
+    _logger.info("  Legendre Polynomial Fitting:")
+    _logger.info(f"    - Maximum degree: {max_degree}")
+    _logger.info(f"    - Degree selection: {select_degree if select_degree else 'fixed (use max)'}")
+    _logger.info(f"    - Ridge regularization λ: {ridge_lambda}")
+    if use_model_averaging:
+        _logger.info(f"    - Model averaging: enabled (min degree: {min_degree_for_averaging})")
+    else:
+        _logger.info("    - Model averaging: disabled")
+    _logger.info("")
+
+    # Warning legend
+    _logger.info("[WARNING LEGEND]")
+    _logger.info("  The following warnings may appear during fitting:")
+    _logger.info("")
+    _logger.info("  - 'No EXFOR data': No experimental points found within energy tolerance")
+    _logger.info("      -> Effect: Coefficients will be INTERPOLATED from neighboring bins")
+    _logger.info("      -> Action: Check data coverage for this energy region")
+    _logger.info("")
+    _logger.info("  - 'Low N_eff=X.X (threshold: Y)': Effective sample size is low")
+    _logger.info("      -> Cause: Few independent data points or highly unequal weights")
+    _logger.info("      -> Effect: Larger statistical uncertainty in fitted coefficients")
+    _logger.info("      -> Action: Consider widening σE cutoff or checking data availability")
+    _logger.info("")
+    _logger.info("  - 'Wide weight span (X.XXXX MeV = Y.Yxσ_E)': Energy spread of contributing data")
+    _logger.info("      -> Cause: EXFOR data energies span a wide range around target energy")
+    _logger.info("      -> Effect: Potential bias from energy-dependent shape changes")
+    _logger.info("      -> Action: Review if energy resolution assumptions are appropriate")
+    _logger.info("")
+    if experiment_selection_method == "kernel_weights":
+        _logger.info("  - 'Experiment capping applied': One experiment dominated the weights")
+        _logger.info(f"      -> Cause: Experiment exceeded {max_experiment_weight_fraction*100:.0f}% of total weight")
+        _logger.info("      -> Effect: Weight redistributed to prevent single-experiment bias")
+        _logger.info("      -> Action: This is protective; review if capping is frequent")
+        _logger.info("")
+
+    _logger.info("  - 'INTERPOLATED from neighboring bins': No EXFOR data at this energy")
+    _logger.info("      -> Cause: No experimental data available within energy tolerance")
+    _logger.info("      -> Effect: Coefficients linearly interpolated from neighboring bins with data")
+    _logger.info("      -> Note: Original ENDF coefficients are NEVER used (ensures independence)")
+    _logger.info("")
+    _logger.info("  - 'Below/Above EXFOR data range - extrapolating': Energy outside data coverage")
+    _logger.info("      -> Cause: Energy bin is below/above the range of available EXFOR data")
+    _logger.info("      -> Effect: Uses nearest neighbor's coefficients (no interpolation possible)")
+    _logger.info("      -> Action: Expand energy range coverage or accept extrapolation uncertainty")
+    _logger.info("")
+
+    # Fixed parameters
+    _logger.info("[FIXED PARAMETERS]")
+    _logger.info(f"  ENDF file: {endf_file}")
+    _logger.info(f"  Output directory: {output_dir}")
+    _logger.info(f"  Energy range: [{energy_min_mev:.3f}, {energy_max_mev:.3f}] MeV")
+    _logger.info(f"  MT number: {mt_number}")
+    _logger.info(f"  Target mass (m_targ): {m_targ_u} u")
+    _logger.info(f"  Projectile mass (m_proj): {m_proj_u} u")
+    _logger.info(f"  MC samples: {n_samples}")
+    _logger.info(f"  Parallel processes: {n_procs}")
+    _logger.info(f"  Base seed: {base_seed}")
+    if exclude_experiments:
+        _logger.info(f"  Excluded experiments: {exclude_experiments}")
+    else:
+        _logger.info(f"  Excluded experiments: None")
+    if min_relative_uncertainty > 0:
+        _logger.info(f"  Min relative uncertainty floor: {min_relative_uncertainty*100:.1f}%")
+    else:
+        _logger.info(f"  Min relative uncertainty floor: Disabled")
+    _logger.info("")
+    _logger.info(separator)
 
     # Validate inputs
     if not os.path.exists(endf_file):
@@ -745,6 +1209,7 @@ def run_exfor_to_endf_sampling_v2(
             mt=mt_number,
             energy_range=(energy_min_mev, energy_max_mev) if energy_min_mev and energy_max_mev else None,
             supplementary_json_files=supplementary_json_files,
+            exclude_experiments=exclude_experiments,
             logger=_logger,
         )
         t_exfor_elapsed = time.time() - t_exfor_start
@@ -840,26 +1305,102 @@ def run_exfor_to_endf_sampling_v2(
         delta_t_ns=delta_t_ns,
         flight_path_m=flight_path_m,
         tikhonov_lambda=tikhonov_lambda,
+        exclude_experiments=exclude_experiments,
+        min_relative_uncertainty=min_relative_uncertainty,
         logger=_logger,
     )
 
     t_nominal_elapsed = time.time() - t_fit_start
     n_with_data = sum(1 for nr in nominal_results if nr.has_data)
     _logger.info(f"  Nominal fits completed in {t_nominal_elapsed:.2f}s")
+    _logger.info(f"  Bins with EXFOR data: {n_with_data}/{len(nominal_results)}")
     print(f"[INFO] Nominal fits completed ({n_with_data}/{len(nominal_results)} with data)")
 
-    # Step 5: MC sampling (simplified for global_convolution)
+    # Step 4b: Interpolate missing bins (NEVER use original ENDF coefficients)
+    n_missing = len(nominal_results) - n_with_data
+    if n_missing > 0:
+        _logger.info("")
+        _logger.info("[STEP 4b] Interpolating missing energy bins")
+        _logger.info(f"  Bins needing interpolation: {n_missing}")
+
+        nominal_results = interpolate_missing_nominal_fits(
+            nominal_results=nominal_results,
+            logger=_logger,
+        )
+
+        # Count results after interpolation
+        n_with_data_after = sum(1 for nr in nominal_results if nr.has_data)
+        n_interpolated = sum(1 for nr in nominal_results if nr.interpolated)
+        _logger.info(f"  After interpolation: {n_with_data_after}/{len(nominal_results)} bins have coefficients")
+        _logger.info(f"  ({n_interpolated} interpolated, {n_with_data_after - n_interpolated} from EXFOR)")
+        _logger.info(f"  IMPORTANT: Original ENDF coefficients are NEVER used as fallback")
+        _logger.info(f"  (This ensures an independent evaluation based solely on EXFOR data)")
+        print(f"[INFO] Interpolated {n_interpolated} bins without EXFOR data")
+
+    # Log experiment summary (quick overview of all data sources used)
+    log_experiments_summary(nominal_results, logger=_logger)
+
+    # Step 5: MC sampling
+    # Perform actual Monte Carlo sampling for bins with EXFOR data.
+    # Interpolated bins use nominal coefficients (no data to sample from).
     _logger.info("")
     _logger.info("[STEP 5] Phase 2: MC sampling")
+    _logger.info(f"  Generating {n_samples} MC samples per energy bin")
 
-    all_samples = {}
-    if experiment_selection_method == "global_convolution":
-        _logger.info("  Global convolution: using nominal coefficients for all samples")
-        for sample_idx in range(n_samples):
-            all_samples[sample_idx] = {}
-            for nr in nominal_results:
-                if nr.has_data:
-                    all_samples[sample_idx][nr.energy_index] = nr.nominal_coeffs.copy()
+    # Initialize all_samples: Dict[sample_idx, Dict[energy_idx, coeffs]]
+    all_samples = {s_idx: {} for s_idx in range(n_samples)}
+
+    n_sampled = 0
+    n_interpolated_used = 0
+
+    for nr in nominal_results:
+        if not nr.has_data:
+            continue
+
+        energy_idx = nr.energy_index
+
+        if nr.interpolated:
+            # Interpolated bins: use nominal coefficients for all samples
+            # (no EXFOR data to sample from)
+            endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+            for s_idx in range(n_samples):
+                all_samples[s_idx][energy_idx] = endf_coeffs
+            n_interpolated_used += 1
+        else:
+            # Bins with EXFOR data: perform actual MC sampling
+            # Call sample_legendre_coefficients with n_samples > 1 to generate diverse samples
+            try:
+                coef_df, _ = sample_legendre_coefficients(
+                    nr.exfor_df,
+                    value_col="value",
+                    unc_col="unc",
+                    degree=nr.frozen_degree,  # Use the degree from nominal fit
+                    max_degree=max_degree,
+                    select_degree=None,  # Don't re-select, use frozen degree
+                    ridge_lambda=ridge_lambda,
+                    external_weights=nr.kernel_weights if len(nr.kernel_weights) > 0 else None,
+                    n_samples=n_samples,  # Actual MC sampling!
+                    use_band_discrepancy=use_band_discrepancy,
+                    min_points_per_band=min_points_per_band,
+                    max_tau_fraction=max_tau_fraction,
+                )
+
+                # Store each sample's coefficients
+                for s_idx in range(n_samples):
+                    sample_coeffs = coef_df.iloc[s_idx].to_numpy()
+                    endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
+                    all_samples[s_idx][energy_idx] = endf_coeffs
+
+                n_sampled += 1
+
+            except Exception as e:
+                # Fallback to nominal coefficients if sampling fails
+                _logger.warning(f"  MC sampling failed for E={nr.energy_mev:.4f} MeV: {e}")
+                endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+                for s_idx in range(n_samples):
+                    all_samples[s_idx][energy_idx] = endf_coeffs
+
+    _logger.info(f"  MC sampled: {n_sampled} bins, interpolated: {n_interpolated_used} bins")
 
     # Step 6: Save coefficients
     _logger.info("")
@@ -890,6 +1431,35 @@ def run_exfor_to_endf_sampling_v2(
             energy_indices=energy_indices,
             max_order=max_degree,
         )
+
+        # Validate covariance: check that diagonal values are non-trivial
+        diag = np.diag(cov_matrix)
+        diag_nonzero = diag[diag > 0]
+        if len(diag_nonzero) > 0:
+            min_diag = np.min(diag_nonzero)
+            max_diag = np.max(diag_nonzero)
+            mean_diag = np.mean(diag_nonzero)
+            # Compute standard deviation of normalized Legendre coefficients
+            # Note: The coefficients a_l = (c_l/c0)/(2l+1) are already normalized
+            # by the total cross section, making them dimensionless. Their std dev
+            # is thus inherently a fractional quantity (not a "relative uncertainty"
+            # in the traditional sense of std/mean).
+            mean_coeff_std = np.sqrt(mean_diag)
+            _logger.info(f"  Diagonal stats: min={min_diag:.2e}, max={max_diag:.2e}, mean={mean_diag:.2e}")
+            _logger.info(f"  Mean Legendre coeff std: {mean_coeff_std:.4f}")
+            _logger.info(f"  (As fraction of unity: {mean_coeff_std*100:.2f}% - coeffs are normalized)")
+
+            if np.all(diag < 1e-20):
+                _logger.error(
+                    "  WARNING: All diagonal covariance values are essentially zero!",
+                    console=True
+                )
+                _logger.error(
+                    "  This indicates MC sampling failed - all samples may be identical.",
+                    console=True
+                )
+        else:
+            _logger.warning("  WARNING: No positive diagonal elements in covariance matrix!")
 
         np.save(output_path / "legendre_covariance.npy", cov_matrix)
         np.save(output_path / "legendre_correlation.npy", corr_matrix)
@@ -1057,7 +1627,10 @@ if __name__ == "__main__":
         # Database configuration
         exfor_db_path=EXFOR_DB_PATH,
         exfor_source=EXFOR_SOURCE,
-        target_zaid=TARGET_ZAID,
+        target_zaid=TARGET_ZAIDS,
         target_projectile=TARGET_PROJECTILE,
         supplementary_json_files=SUPPLEMENTARY_JSON_FILES,
+        # Experiment exclusion and uncertainty floor
+        exclude_experiments=EXCLUDE_EXPERIMENTS,
+        min_relative_uncertainty=MIN_RELATIVE_UNCERTAINTY,
     )
