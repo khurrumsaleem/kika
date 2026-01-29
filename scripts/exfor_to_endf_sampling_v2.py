@@ -62,6 +62,8 @@ from scripts.exfor_utils import (
     EnergyBinInfo,
     SamplingResult,
     KernelDiagnostics,
+    DatasetEnergyInfo,
+    BinJumpDiagnostics,
     # Energy binning
     compute_energy_bins_with_tof_resolution,
     # EXFOR data conversion (new API -> legacy format)
@@ -69,6 +71,10 @@ from scripts.exfor_utils import (
     # EXFOR filtering (per-energy methods)
     filter_exfor_with_kernel_weights,
     filter_exfor_with_energy_bin,
+    # Energy jitter MC (Improvement 1.4)
+    precompute_dataset_energy_info,
+    run_mc_with_energy_jitter,
+    log_bin_jump_diagnostics,
     # Covariance
     compute_covariance_from_samples,
     save_all_legendre_coefficients,
@@ -80,6 +86,14 @@ from scripts.exfor_utils import (
     _write_sample_wrapper,
 )
 
+# Import TOF parameters module (Improvement 1.4)
+from scripts.tof_parameters import (
+    load_tof_parameters_file,
+    get_tof_parameters,
+    compute_sigma_E,
+    summarize_tof_parameters,
+)
+
 # Import resample_AD functions (relative import from scripts package)
 from scripts.resample_AD import (
     sample_legendre_coefficients,
@@ -88,7 +102,13 @@ from scripts.resample_AD import (
     smooth_tau_in_energy,
     compute_n_eff,
     fit_legendre_global_convolution,
+    build_global_convolution_system,
+    solve_global_convolution,
+    solve_global_convolution_shape_only,
+    sample_global_convolution_mc,
+    sample_global_convolution_mc_shape_only,
     GlobalFitDiagnostics,
+    GlobalConvolutionSystem,
 )
 
 import time
@@ -211,12 +231,18 @@ N_SIGMA_CUTOFF = 3.0                             # Gaussian kernel cutoff (±n_s
 
 # --- 6b. Global Convolution (EXPERIMENT_SELECTION_METHOD = "global_convolution") ---
 GLOBAL_CONV_LAMBDA = 0.001                       # Tikhonov regularization strength
+L_DEPENDENT_POWER = 2.0                          # ℓ-scaling exponent (2-4 recommended)
+SKIP_C0_REGULARIZATION = True                    # Don't apply smoothing penalty to c0
+MIN_WEIGHT_SUM_THRESHOLD = 0.95                  # Warn if weight_sum < this (skip if < 0.5)
+GLOBAL_CONV_SHAPE_ONLY = True                   # Two-pass shape-only fit (Improvement 3.4)
 
 # --- 6c. Kernel Weight Control (EXPERIMENT_SELECTION_METHOD = "kernel_weights") ---
 MIN_KERNEL_WEIGHT_FRACTION = 1e-3                # Minimum weight threshold
 MAX_EXPERIMENT_WEIGHT_FRACTION = 0.5             # Weight cap per experiment
 N_EFF_WARNING_THRESHOLD = 5.0                    # Warning if N_eff < threshold
 WEIGHT_SPAN_WARNING_RATIO = 3.0                  # Warning if span > ratio * σE
+DEDUPE_NOMINAL = True                            # Dedupe for nominal fits (stability)
+DEDUPE_MC = False                                # Dedupe for MC sampling (False enables energy correlations)
 
 # --- 6d. Angular-Band Discrepancy (kernel_weights, energy_bin) ---
 USE_BAND_DISCREPANCY = True                      # Use band-based uncertainty (vs global Birge)
@@ -226,10 +252,23 @@ TAU_SMOOTHING_WINDOW = 3                         # Moving median window for τ_b
 
 # --- 6e. Per-Experiment Normalization (kernel_weights, energy_bin) ---
 NORMALIZATION_SIGMA = 0.05                       # Per-experiment normalization uncertainty (5%)
+NORM_DIST = "lognormal"                          # Distribution: "lognormal" (always positive) or "normal"
 
 # --- 6f. Model Averaging (kernel_weights, energy_bin) ---
 USE_MODEL_AVERAGING = True                       # Enable model averaging over Legendre orders
 MIN_DEGREE_FOR_AVERAGING = 1                     # Minimum degree to consider (1 = include all)
+USE_DEGREE_SAMPLING_IN_MC = True                 # Sample degree from degree_weights distribution
+
+# --- 6g. Energy Bin Method Specific (Improvements 1.1-1.2) ---
+NORMALIZE_BY_N_POINTS = True                     # Equal weight per experiment (1/n_points weighting)
+MAX_EXP_WEIGHT_FRAC_BIN = 0.5                    # Cap per-experiment dominance (1.0 = disabled)
+FREEZE_C0 = True                                # Fix c0 for shape-only refits
+
+# --- 6h. Energy Jitter for Cross-Bin Coupling (Improvement 1.4) ---
+USE_ENERGY_JITTER = True                         # Enable energy jitter for cross-bin correlation
+TOF_PARAMETERS_FILE = "/share_snc/snc/JuanMonleon/EXFOR/exfor_tof_parameters.json"
+JITTER_N_SIGMA_CLIP = 3.0                        # Clip jitter at ±n_sigma
+TRACK_BIN_JUMPS = True                           # Track bin jump statistics for diagnostics
 
 # =============================================================================
 # END OF CONFIGURATION
@@ -262,6 +301,9 @@ class NominalFitResult:
     kernel_diagnostics: Optional[KernelDiagnostics] = None
     degree_weights: Optional[Dict[int, float]] = None
     all_degrees_info: Optional[Dict[int, Dict]] = None
+    # Two-pass dedupe: store non-dedupe data for MC if needed
+    exfor_df_mc: Optional[pd.DataFrame] = None
+    kernel_weights_mc: Optional[np.ndarray] = None
 
 
 # Import the rest of the workflow functions from the original script
@@ -541,15 +583,29 @@ def perform_nominal_fits(
     delta_t_ns: float = 10.0,
     flight_path_m: float = 27.037,
     tikhonov_lambda: float = 0.001,
+    l_dependent_power: float = 2.0,
+    skip_c0_regularization: bool = True,
+    min_weight_sum_threshold: float = 0.95,
+    shape_only: bool = False,
     exclude_experiments: Optional[List[str]] = None,
     min_relative_uncertainty: float = 0.0,
     logger = None,
-) -> List[NominalFitResult]:
-    """Phase 1: Perform nominal fits to determine frozen orders and band discrepancies."""
+) -> Tuple[List[NominalFitResult], Optional[GlobalConvolutionSystem], Optional[Dict[int, float]]]:
+    """Phase 1: Perform nominal fits to determine frozen orders and band discrepancies.
+
+    Returns
+    -------
+    Tuple[List[NominalFitResult], Optional[GlobalConvolutionSystem], Optional[Dict[int, float]]]
+        - List of nominal fit results for each energy bin
+        - GlobalConvolutionSystem for MC sampling (only for global_convolution method)
+        - c0_frozen dict (energy_index -> c0 value) if shape_only=True and global_convolution method, else None
+    """
     from numpy.polynomial.legendre import legvander, legval
 
     logger = _get_logger()
     results = []
+    global_system = None  # Will be set only for global_convolution method
+    c0_frozen = None  # Will be set only for global_convolution with shape_only=True
 
     # GLOBAL CONVOLUTION METHOD
     if experiment_selection_method == "global_convolution":
@@ -558,12 +614,16 @@ def perform_nominal_fits(
             logger.info("[GLOBAL CONVOLUTION FIT]")
             logger.info(f"  Method: global_convolution (all energies fitted simultaneously)")
             logger.info(f"  Tikhonov λ: {tikhonov_lambda}")
+            logger.info(f"  ℓ-dependent power: {l_dependent_power}")
+            logger.info(f"  Skip c0 regularization: {skip_c0_regularization}")
+            logger.info(f"  Shape-only mode (Improvement 3.4): {shape_only}")
             logger.info(f"  Max Legendre degree: {max_degree}")
             logger.info(f"  Energy kernel cutoff: ±{n_sigma}σ")
             logger.info(f"  Min weight fraction: {min_kernel_weight_fraction}")
+            logger.info(f"  Min weight sum threshold: {min_weight_sum_threshold}")
             logger.info("")
 
-        coeffs_by_energy, global_diag = fit_legendre_global_convolution(
+        coeffs_by_energy, global_diag, global_system, c0_frozen = fit_legendre_global_convolution(
             exfor_cache=exfor_cache,
             sorted_energies=sorted_energies,
             energy_bins=energy_bins,
@@ -571,10 +631,14 @@ def perform_nominal_fits(
             n_sigma=n_sigma,
             tikhonov_lambda=tikhonov_lambda,
             min_kernel_weight_fraction=min_kernel_weight_fraction,
+            min_weight_sum_threshold=min_weight_sum_threshold,
             m_proj_u=m_proj_u,
             m_targ_u=m_targ_u,
             delta_t_ns=delta_t_ns,
             flight_path_m=flight_path_m,
+            l_dependent_power=l_dependent_power,
+            skip_c0_regularization=skip_c0_regularization,
+            shape_only=shape_only,
             logger=logger,
         )
 
@@ -634,10 +698,14 @@ def perform_nominal_fits(
             logger.info("[GLOBAL FIT SUMMARY]")
             logger.info(f"  Energies with data: {n_with_data}/{len(energy_bins)}")
             logger.info(f"  Total χ² = {global_diag.chi2:.2f}")
-            if hasattr(global_diag, 'n_eff_total') and global_diag.n_eff_total:
-                logger.info(f"  Total N_eff = {global_diag.n_eff_total:.1f}")
-            if hasattr(global_diag, 'n_points_total') and global_diag.n_points_total:
-                logger.info(f"  Total data points = {global_diag.n_points_total}")
+            logger.info(f"  Total data points = {global_diag.n_data_points}")
+            # Log weight guard diagnostics (Improvement 3.2)
+            if global_diag.weight_sum_min < 1.0:
+                logger.info(f"  Min weight sum: {global_diag.weight_sum_min:.3f}")
+            if global_diag.n_datasets_skipped > 0:
+                logger.warning(f"  Datasets skipped (severe truncation): {global_diag.n_datasets_skipped}")
+            if global_diag.truncated_datasets:
+                logger.info(f"  Datasets with moderate truncation: {len(global_diag.truncated_datasets)}")
             logger.info("")
             # Log per-energy results in condensed form
             logger.info("  Per-energy results:")
@@ -652,10 +720,14 @@ def perform_nominal_fits(
                     logger.info(f"    E={bin_info.energy_mev:.4f} MeV: No data")
             logger.info("")
 
-        return results
+        return results, global_system, c0_frozen
 
     # PER-ENERGY METHODS
     for bin_info in energy_bins:
+        # Initialize MC-specific data (only used by kernel_weights method with two-pass dedupe)
+        exfor_df_mc = None
+        kernel_weights_mc = None
+
         if experiment_selection_method == "energy_bin":
             exfor_df, experiments_info, kernel_weights, diagnostics = filter_exfor_with_energy_bin(
                 exfor_cache=exfor_cache,
@@ -668,8 +740,12 @@ def perform_nominal_fits(
                 dedupe_per_experiment=True,
                 exclude_experiments=exclude_experiments,
                 min_relative_uncertainty=min_relative_uncertainty,
+                # Per-experiment weighting (Improvement 1.1)
+                normalize_by_n_points=NORMALIZE_BY_N_POINTS,
+                max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
             )
         else:
+            # Nominal fit filter (always with DEDUPE_NOMINAL)
             exfor_df, experiments_info, kernel_weights, diagnostics = filter_exfor_with_kernel_weights(
                 exfor_cache=exfor_cache,
                 sorted_energies=sorted_energies,
@@ -684,13 +760,37 @@ def perform_nominal_fits(
                 max_experiment_weight_fraction=max_experiment_weight_fraction,
                 default_delta_t_ns=delta_t_ns,
                 default_flight_path_m=flight_path_m,
-                use_overlap_weights=False,
-                normalize_by_n_points=False,
-                dedupe_per_experiment=True,
+                use_overlap_weights=True,
+                normalize_by_n_points=True,
+                dedupe_per_experiment=DEDUPE_NOMINAL,
                 exclude_experiments=exclude_experiments,
                 min_relative_uncertainty=min_relative_uncertainty,
                 logger=logger,
             )
+
+            # MC filter (if different from nominal - two-pass dedupe)
+            if DEDUPE_MC != DEDUPE_NOMINAL:
+                exfor_df_mc, _, kernel_weights_mc, _ = filter_exfor_with_kernel_weights(
+                    exfor_cache=exfor_cache,
+                    sorted_energies=sorted_energies,
+                    energy_mev=bin_info.energy_mev,
+                    sigma_E_mev=bin_info.sigma_E_mev,
+                    n_sigma=n_sigma,
+                    m_proj_u=m_proj_u,
+                    m_targ_u=m_targ_u,
+                    bin_lower_mev=bin_info.bin_lower_mev,
+                    bin_upper_mev=bin_info.bin_upper_mev,
+                    min_kernel_weight_fraction=min_kernel_weight_fraction,
+                    max_experiment_weight_fraction=max_experiment_weight_fraction,
+                    default_delta_t_ns=delta_t_ns,
+                    default_flight_path_m=flight_path_m,
+                    use_overlap_weights=True,
+                    normalize_by_n_points=True,
+                    dedupe_per_experiment=DEDUPE_MC,
+                    exclude_experiments=exclude_experiments,
+                    min_relative_uncertainty=min_relative_uncertainty,
+                    logger=None,  # Don't log MC filter details
+                )
 
         if exfor_df.empty or len(exfor_df) < 3:
             results.append(NominalFitResult(
@@ -809,6 +909,9 @@ def perform_nominal_fits(
             kernel_diagnostics=diagnostics,
             degree_weights=degree_weights,
             all_degrees_info=all_degrees_info,
+            # Two-pass dedupe: MC-specific data (only used by kernel_weights method)
+            exfor_df_mc=exfor_df_mc,
+            kernel_weights_mc=kernel_weights_mc,
         ))
 
         # Log comprehensive energy bin information
@@ -845,7 +948,7 @@ def perform_nominal_fits(
                 if r.has_data and r.energy_mev in smoothed_tau:
                     r.tau_info = smoothed_tau[r.energy_mev]
 
-    return results
+    return results, None, None  # No global_system or c0_frozen for per-energy methods
 
 
 # Import PrecomputedEnergyData, _precompute_energy_data, _sample_one_realization, run_mc_per_realization
@@ -1282,7 +1385,7 @@ def run_exfor_to_endf_sampling_v2(
 
     t_fit_start = time.time()
 
-    nominal_results = perform_nominal_fits(
+    nominal_results, global_system, c0_frozen_from_nominal = perform_nominal_fits(
         energy_bins=energy_bins,
         exfor_cache=exfor_cache,
         sorted_energies=sorted_exfor_energies,
@@ -1305,6 +1408,10 @@ def run_exfor_to_endf_sampling_v2(
         delta_t_ns=delta_t_ns,
         flight_path_m=flight_path_m,
         tikhonov_lambda=tikhonov_lambda,
+        l_dependent_power=L_DEPENDENT_POWER,
+        skip_c0_regularization=SKIP_C0_REGULARIZATION,
+        min_weight_sum_threshold=MIN_WEIGHT_SUM_THRESHOLD,
+        shape_only=GLOBAL_CONV_SHAPE_ONLY,
         exclude_experiments=exclude_experiments,
         min_relative_uncertainty=min_relative_uncertainty,
         logger=_logger,
@@ -1341,66 +1448,332 @@ def run_exfor_to_endf_sampling_v2(
     log_experiments_summary(nominal_results, logger=_logger)
 
     # Step 5: MC sampling
-    # Perform actual Monte Carlo sampling for bins with EXFOR data.
-    # Interpolated bins use nominal coefficients (no data to sample from).
+    # Three modes available:
+    # 1. Global convolution MC (for global_convolution method): All energies sampled jointly
+    # 2. Energy jitter MC (for energy_bin method): Cross-bin correlation via energy perturbation
+    # 3. Per-bin independent MC: Original method with independent sampling per bin
     _logger.info("")
     _logger.info("[STEP 5] Phase 2: MC sampling")
-    _logger.info(f"  Generating {n_samples} MC samples per energy bin")
+    _logger.info(f"  Generating {n_samples} MC samples")
 
-    # Initialize all_samples: Dict[sample_idx, Dict[energy_idx, coeffs]]
-    all_samples = {s_idx: {} for s_idx in range(n_samples)}
+    # GLOBAL CONVOLUTION MC (Improvement 3.1 - Fix MC Sampling)
+    if experiment_selection_method == "global_convolution" and global_system is not None:
+        # Shape-only MC (Improvement 3.4): c0 frozen, only c1..cL sampled
+        if GLOBAL_CONV_SHAPE_ONLY and c0_frozen_from_nominal is not None:
+            _logger.info(f"  Method: Global convolution MC (shape-only, c0 frozen)")
+            _logger.info(f"  Experiment normalization σ: {sigma_norm}")
+            _logger.info(f"  Tikhonov λ: {tikhonov_lambda}")
+            _logger.info(f"  ℓ-dependent power: {L_DEPENDENT_POWER}")
 
-    n_sampled = 0
-    n_interpolated_used = 0
-
-    for nr in nominal_results:
-        if not nr.has_data:
-            continue
-
-        energy_idx = nr.energy_index
-
-        if nr.interpolated:
-            # Interpolated bins: use nominal coefficients for all samples
-            # (no EXFOR data to sample from)
-            endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
-            for s_idx in range(n_samples):
-                all_samples[s_idx][energy_idx] = endf_coeffs
-            n_interpolated_used += 1
+            all_samples_raw, mc_diagnostics = sample_global_convolution_mc_shape_only(
+                system=global_system,
+                c0_frozen=c0_frozen_from_nominal,
+                n_samples=n_samples,
+                sigma_norm=sigma_norm,
+                tikhonov_lambda=tikhonov_lambda,
+                l_dependent_power=L_DEPENDENT_POWER,
+                seed=base_seed,
+                logger=_logger,
+            )
         else:
-            # Bins with EXFOR data: perform actual MC sampling
-            # Call sample_legendre_coefficients with n_samples > 1 to generate diverse samples
-            try:
-                coef_df, _ = sample_legendre_coefficients(
-                    nr.exfor_df,
-                    value_col="value",
-                    unc_col="unc",
-                    degree=nr.frozen_degree,  # Use the degree from nominal fit
-                    max_degree=max_degree,
-                    select_degree=None,  # Don't re-select, use frozen degree
-                    ridge_lambda=ridge_lambda,
-                    external_weights=nr.kernel_weights if len(nr.kernel_weights) > 0 else None,
-                    n_samples=n_samples,  # Actual MC sampling!
-                    use_band_discrepancy=use_band_discrepancy,
-                    min_points_per_band=min_points_per_band,
-                    max_tau_fraction=max_tau_fraction,
+            _logger.info(f"  Method: Global convolution MC (all energies sampled jointly)")
+            _logger.info(f"  Experiment normalization σ: {sigma_norm}")
+
+            # Generate MC samples using the global system
+            all_samples_raw, mc_diagnostics = sample_global_convolution_mc(
+                system=global_system,
+                n_samples=n_samples,
+                sigma_norm=sigma_norm,
+                seed=base_seed,
+                logger=_logger,
+            )
+
+        # Convert to the expected format: Dict[sample_idx, Dict[energy_idx, coeffs]]
+        all_samples = {s_idx: {} for s_idx in range(n_samples)}
+        n_coeffs = global_system.n_coeffs
+
+        for s_idx in range(n_samples):
+            coeffs_vec = all_samples_raw[s_idx, :]
+            for bin_info in energy_bins:
+                param_start = global_system.energy_idx_to_param_start[bin_info.index]
+                raw_coeffs = coeffs_vec[param_start:param_start + n_coeffs]
+                endf_coeffs = endf_normalize_legendre_coeffs(raw_coeffs, include_a0=False)
+                all_samples[s_idx][bin_info.index] = endf_coeffs
+
+        n_sampled = len([nr for nr in nominal_results if nr.has_data and not nr.interpolated])
+        n_interpolated_used = len([nr for nr in nominal_results if nr.has_data and nr.interpolated])
+
+        _logger.info(f"  MC sampling complete: {n_sampled} energies with data, {n_interpolated_used} interpolated")
+        _logger.info(f"  Mean coeff std/mean ratio: {mc_diagnostics.get('coeffs_mean_std_ratio', 0):.4f}")
+
+        # Shape-only specific diagnostics
+        if GLOBAL_CONV_SHAPE_ONLY and mc_diagnostics.get('shape_only'):
+            _logger.info(f"  c0 max std across samples: {mc_diagnostics.get('c0_max_std', 0):.2e} (should be ~0)")
+
+        # Validation: Check that samples differ (MF34 should be non-zero)
+        sample_stds = []
+        for bin_info in energy_bins:
+            if bin_info.index in all_samples[0]:
+                coeffs_across_samples = np.array([all_samples[s][bin_info.index] for s in range(n_samples)])
+                sample_std = np.std(coeffs_across_samples, axis=0)
+                sample_stds.extend(sample_std)
+        mean_sample_std = np.mean(sample_stds) if sample_stds else 0
+        if mean_sample_std < 1e-10:
+            _logger.warning("  WARNING: MC samples appear identical (mean std ≈ 0)")
+            _logger.warning("  This may result in zero covariance/MF34. Check system setup.")
+        else:
+            _logger.info(f"  Sample diversity check: mean coeff std = {mean_sample_std:.6f}")
+
+    # Check if energy jitter is enabled and applicable
+    elif USE_ENERGY_JITTER and experiment_selection_method == "energy_bin" and TOF_PARAMETERS_FILE is not None:
+        use_jitter = True
+        _logger.info(f"  Method: Energy jitter MC (Improvement 1.4)")
+        _logger.info(f"  TOF parameters file: {TOF_PARAMETERS_FILE}")
+        _logger.info(f"  Jitter clipping: ±{JITTER_N_SIGMA_CLIP}σ")
+
+        # Load TOF parameters
+        try:
+            tof_params_cache = load_tof_parameters_file(TOF_PARAMETERS_FILE)
+            _logger.info(f"  Loaded TOF parameters for {len(tof_params_cache)} experiments")
+        except FileNotFoundError:
+            _logger.warning(f"  TOF parameters file not found: {TOF_PARAMETERS_FILE}")
+            _logger.warning(f"  Falling back to per-bin independent MC")
+            use_jitter = False
+            tof_params_cache = {}
+        except Exception as e:
+            _logger.warning(f"  Failed to load TOF parameters: {e}")
+            _logger.warning(f"  Falling back to per-bin independent MC")
+            use_jitter = False
+            tof_params_cache = {}
+
+        if use_jitter:
+            # Precompute dataset energy info (σE for each dataset)
+            dataset_info_by_bin = precompute_dataset_energy_info(
+                nominal_results=nominal_results,
+                tof_params_cache=tof_params_cache,
+                energy_bins=energy_bins,
+                default_flight_path_m=flight_path_m,
+                default_time_resolution_ns=delta_t_ns,
+            )
+
+            # Log summary of TOF parameter sources
+            all_subentries = []
+            for datasets in dataset_info_by_bin.values():
+                for ds in datasets:
+                    all_subentries.append(f"{ds.entry}{ds.subentry}")
+
+            if all_subentries:
+                tof_summary = summarize_tof_parameters(
+                    tof_params_cache, all_subentries,
+                    default_flight_path_m=flight_path_m,
+                    default_time_resolution_ns=delta_t_ns,
                 )
+                _logger.info(f"  TOF params from file: {tof_summary['n_from_file']}, using defaults: {tof_summary['n_default']}")
 
-                # Store each sample's coefficients
-                for s_idx in range(n_samples):
-                    sample_coeffs = coef_df.iloc[s_idx].to_numpy()
-                    endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
-                    all_samples[s_idx][energy_idx] = endf_coeffs
+            # Run MC with energy jitter
+            all_samples, bin_jump_diag = run_mc_with_energy_jitter(
+                nominal_results=nominal_results,
+                energy_bins=energy_bins,
+                dataset_info_by_bin=dataset_info_by_bin,
+                exfor_cache=exfor_cache,
+                sorted_energies=sorted_exfor_energies,
+                n_samples=n_samples,
+                base_seed=base_seed,
+                max_degree=max_degree,
+                ridge_lambda=ridge_lambda,
+                m_proj_u=m_proj_u,
+                m_targ_u=m_targ_u,
+                use_band_discrepancy=use_band_discrepancy,
+                min_points_per_band=min_points_per_band,
+                max_tau_fraction=max_tau_fraction,
+                jitter_n_sigma_clip=JITTER_N_SIGMA_CLIP,
+                track_bin_jumps=TRACK_BIN_JUMPS,
+                min_relative_uncertainty=min_relative_uncertainty,
+                freeze_c0=FREEZE_C0,
+                sigma_norm=NORMALIZATION_SIGMA,
+                norm_dist=NORM_DIST,
+                logger=_logger,
+            )
 
-                n_sampled += 1
+            # Log bin jump diagnostics
+            if TRACK_BIN_JUMPS:
+                log_bin_jump_diagnostics(bin_jump_diag, energy_bins, logger=_logger)
 
-            except Exception as e:
-                # Fallback to nominal coefficients if sampling fails
-                _logger.warning(f"  MC sampling failed for E={nr.energy_mev:.4f} MeV: {e}")
+            n_sampled = sum(1 for nr in nominal_results if nr.has_data and not nr.interpolated)
+            n_interpolated_used = sum(1 for nr in nominal_results if nr.has_data and nr.interpolated)
+            _logger.info(f"  MC sampled with jitter: {n_sampled} bins, interpolated: {n_interpolated_used} bins")
+
+        # If use_jitter was set to False during loading, fall through to per-bin MC
+        if not use_jitter:
+            # Fallback to per-bin MC if jitter loading failed
+            _logger.info(f"  Method: Per-bin independent MC (jitter fallback)")
+
+            # Initialize all_samples: Dict[sample_idx, Dict[energy_idx, coeffs]]
+            all_samples = {s_idx: {} for s_idx in range(n_samples)}
+
+            n_sampled = 0
+            n_interpolated_used = 0
+
+            for nr in nominal_results:
+                if not nr.has_data:
+                    continue
+
+                energy_idx = nr.energy_index
+
+                if nr.interpolated:
+                    endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+                    for s_idx in range(n_samples):
+                        all_samples[s_idx][energy_idx] = endf_coeffs
+                    n_interpolated_used += 1
+                else:
+                    bin_seed = base_seed + energy_idx
+                    mc_df = nr.exfor_df_mc if nr.exfor_df_mc is not None else nr.exfor_df
+                    mc_weights = nr.kernel_weights_mc if nr.kernel_weights_mc is not None else nr.kernel_weights
+
+                    try:
+                        coef_df, _ = sample_legendre_coefficients(
+                            mc_df,
+                            value_col="value",
+                            unc_col="unc",
+                            degree=nr.frozen_degree,
+                            max_degree=max_degree,
+                            select_degree=None,
+                            ridge_lambda=ridge_lambda,
+                            external_weights=mc_weights if len(mc_weights) > 0 else None,
+                            n_samples=n_samples,
+                            random_state=bin_seed,
+                            use_band_discrepancy=use_band_discrepancy,
+                            min_points_per_band=min_points_per_band,
+                            max_tau_fraction=max_tau_fraction,
+                            freeze_c0=FREEZE_C0,
+                            sigma_norm=NORMALIZATION_SIGMA,
+                            norm_dist=NORM_DIST,
+                        )
+                        for s_idx in range(n_samples):
+                            sample_coeffs = coef_df.iloc[s_idx].to_numpy()
+                            endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
+                            all_samples[s_idx][energy_idx] = endf_coeffs
+                        n_sampled += 1
+                    except Exception as e:
+                        _logger.warning(f"  MC sampling failed for E={nr.energy_mev:.4f} MeV: {e}")
+                        endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+                        for s_idx in range(n_samples):
+                            all_samples[s_idx][energy_idx] = endf_coeffs
+
+            _logger.info(f"  MC sampled: {n_sampled} bins, interpolated: {n_interpolated_used} bins")
+
+    else:
+        # ORIGINAL METHOD: Per-bin independent MC sampling
+        _logger.info(f"  Method: Per-bin independent MC")
+
+        # Initialize all_samples: Dict[sample_idx, Dict[energy_idx, coeffs]]
+        all_samples = {s_idx: {} for s_idx in range(n_samples)}
+
+        n_sampled = 0
+        n_interpolated_used = 0
+
+        for nr in nominal_results:
+            if not nr.has_data:
+                continue
+
+            energy_idx = nr.energy_index
+
+            if nr.interpolated:
+                # Interpolated bins: use nominal coefficients for all samples
+                # (no EXFOR data to sample from)
                 endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
                 for s_idx in range(n_samples):
                     all_samples[s_idx][energy_idx] = endf_coeffs
+                n_interpolated_used += 1
+            else:
+                # Bins with EXFOR data: perform actual MC sampling
+                # Use deterministic seed per energy bin for reproducibility
+                bin_seed = base_seed + energy_idx
+                rng = np.random.default_rng(bin_seed)
 
-    _logger.info(f"  MC sampled: {n_sampled} bins, interpolated: {n_interpolated_used} bins")
+                # Choose data source for MC (two-pass dedupe)
+                mc_df = nr.exfor_df_mc if nr.exfor_df_mc is not None else nr.exfor_df
+                mc_weights = nr.kernel_weights_mc if nr.kernel_weights_mc is not None else nr.kernel_weights
+
+                # Check if degree sampling is enabled (Improvement 2.4)
+                use_degree_sampling = (
+                    USE_DEGREE_SAMPLING_IN_MC and
+                    nr.degree_weights is not None and
+                    len(nr.degree_weights) > 1
+                )
+
+                try:
+                    if use_degree_sampling:
+                        # Per-sample fitting with degree sampling
+                        degrees = list(nr.degree_weights.keys())
+                        probs = np.array(list(nr.degree_weights.values()))
+                        probs = probs / probs.sum()
+
+                        for s_idx in range(n_samples):
+                            sample_degree = rng.choice(degrees, p=probs)
+                            coef_df_single, _ = sample_legendre_coefficients(
+                                mc_df,
+                                value_col="value",
+                                unc_col="unc",
+                                degree=sample_degree,
+                                max_degree=max_degree,
+                                select_degree=None,
+                                ridge_lambda=ridge_lambda,
+                                external_weights=mc_weights if len(mc_weights) > 0 else None,
+                                n_samples=1,
+                                random_state=bin_seed + s_idx,
+                                use_band_discrepancy=use_band_discrepancy,
+                                min_points_per_band=min_points_per_band,
+                                max_tau_fraction=max_tau_fraction,
+                                freeze_c0=FREEZE_C0,
+                                sigma_norm=NORMALIZATION_SIGMA,
+                                norm_dist=NORM_DIST,
+                            )
+                            sample_coeffs = coef_df_single.iloc[0].to_numpy()
+                            # Pad to max_degree+1 if needed
+                            if len(sample_coeffs) < max_degree + 1:
+                                sample_coeffs = np.pad(sample_coeffs, (0, max_degree + 1 - len(sample_coeffs)))
+                            endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
+                            all_samples[s_idx][energy_idx] = endf_coeffs
+                    else:
+                        # Current batch MC behavior (frozen degree)
+                        coef_df, _ = sample_legendre_coefficients(
+                            mc_df,
+                            value_col="value",
+                            unc_col="unc",
+                            degree=nr.frozen_degree,  # Use the degree from nominal fit
+                            max_degree=max_degree,
+                            select_degree=None,  # Don't re-select, use frozen degree
+                            ridge_lambda=ridge_lambda,
+                            external_weights=mc_weights if len(mc_weights) > 0 else None,
+                            n_samples=n_samples,  # Actual MC sampling!
+                            random_state=bin_seed,  # Deterministic seed for reproducibility
+                            use_band_discrepancy=use_band_discrepancy,
+                            min_points_per_band=min_points_per_band,
+                            max_tau_fraction=max_tau_fraction,
+                            # Fixed-c0 mode (Improvement 1.2)
+                            freeze_c0=FREEZE_C0,
+                            # Correlated normalization uncertainty (Improvement 1.3)
+                            sigma_norm=NORMALIZATION_SIGMA,
+                            norm_dist=NORM_DIST,
+                        )
+
+                        # Store each sample's coefficients
+                        for s_idx in range(n_samples):
+                            sample_coeffs = coef_df.iloc[s_idx].to_numpy()
+                            endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
+                            all_samples[s_idx][energy_idx] = endf_coeffs
+
+                    n_sampled += 1
+
+                except Exception as e:
+                    # Fallback to nominal coefficients if sampling fails
+                    _logger.warning(f"  MC sampling failed for E={nr.energy_mev:.4f} MeV: {e}")
+                    endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+                    for s_idx in range(n_samples):
+                        all_samples[s_idx][energy_idx] = endf_coeffs
+
+        _logger.info(f"  MC sampled: {n_sampled} bins, interpolated: {n_interpolated_used} bins")
 
     # Step 6: Save coefficients
     _logger.info("")

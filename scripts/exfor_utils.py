@@ -258,6 +258,68 @@ class KernelDiagnostics:
     capping_applied: bool                           # Whether experiment capping was applied
 
 
+@dataclass
+class DatasetEnergyInfo:
+    """
+    Information about a dataset (experiment at one energy) for energy jitter MC.
+
+    Used in Improvement 1.4 (cross-bin correlation via energy jitter) to track
+    which datasets contribute to which energy bins and their energy resolution.
+
+    Attributes
+    ----------
+    entry : str
+        EXFOR entry number
+    subentry : str
+        EXFOR subentry number
+    nominal_energy_mev : float
+        Original EXFOR measurement energy in MeV
+    sigma_E_mev : float
+        Energy resolution at this energy (from TOF parameters)
+    nominal_bin_index : int
+        Index of the bin containing the nominal energy
+    exfor_df_indices : List[int]
+        Row indices in the combined exfor_df for this dataset
+    tof_source : str
+        Source of TOF parameters: "file" or "default"
+    n_points : int
+        Number of angular data points for this dataset
+    """
+    entry: str
+    subentry: str
+    nominal_energy_mev: float
+    sigma_E_mev: float
+    nominal_bin_index: int
+    exfor_df_indices: List[int]
+    tof_source: str
+    n_points: int = 0
+
+
+@dataclass
+class BinJumpDiagnostics:
+    """
+    Diagnostics for energy jitter bin jumping behavior.
+
+    Tracks how often datasets jump between bins during MC sampling,
+    which indicates the strength of cross-bin energy correlations.
+
+    Interpretation:
+    - Jump rate >30%: Grid finer than σE, strong energy correlations
+    - Jump rate 10-30%: Grid comparable to σE, moderate correlations
+    - Jump rate <10%: Grid coarser than σE, weak correlations
+    """
+    total_assignments: int              # Total dataset-to-bin assignments across all samples
+    jumped_bins: int                    # Number of assignments where dataset jumped from nominal bin
+    jump_rate: float                    # jumped_bins / total_assignments
+    jump_counts: Dict[Tuple[int, int], int]  # {(from_bin, to_bin): count}
+    datasets_outside_range: int         # Datasets that fell outside all bins (clipped or dropped)
+
+    def top_jumps(self, n: int = 5) -> List[Tuple[Tuple[int, int], int]]:
+        """Get the n most common bin jumps."""
+        sorted_jumps = sorted(self.jump_counts.items(), key=lambda x: x[1], reverse=True)
+        return sorted_jumps[:n]
+
+
 # =============================================================================
 # RESOLUTION OVERLAP WEIGHTING
 # =============================================================================
@@ -966,6 +1028,9 @@ def filter_exfor_with_energy_bin(
     dedupe_per_experiment: bool = True,
     exclude_experiments: Optional[List[str]] = None,
     min_relative_uncertainty: float = 0.0,
+    # NEW: per-experiment weighting options (Improvement 1.1)
+    normalize_by_n_points: bool = False,
+    max_experiment_weight_fraction: float = 1.0,  # 1.0 = disabled
 ) -> Tuple[pd.DataFrame, List[Dict], np.ndarray, KernelDiagnostics]:
     """
     Filter EXFOR data using exact energy bin matching.
@@ -1004,13 +1069,21 @@ def filter_exfor_with_energy_bin(
     min_relative_uncertainty : float, optional
         Minimum relative uncertainty as a fraction (default: 0.0 = disabled).
         For example, 0.03 means 3% minimum uncertainty.
+    normalize_by_n_points : bool, optional
+        If True, each point's weight is 1/n_points_for_this_experiment, so each
+        experiment contributes equally regardless of how many points it has.
+        Default: False (uniform weights).
+    max_experiment_weight_fraction : float, optional
+        Maximum allowed weight fraction per experiment (default: 1.0 = disabled).
+        If < 1.0, experiments exceeding this fraction are scaled down.
+        Applied AFTER normalize_by_n_points if both are enabled.
 
     Returns
     -------
     Tuple[pd.DataFrame, List[Dict], np.ndarray, KernelDiagnostics]
         - DataFrame with EXFOR data (kernel_weight = 1.0 for all)
         - List of experiment metadata dicts (includes 'selected_from_n_energies')
-        - Array of kernel weights (all 1.0)
+        - Array of kernel weights
         - KernelDiagnostics object
     """
     # Empty diagnostics for early returns
@@ -1061,14 +1134,37 @@ def filter_exfor_with_energy_bin(
         else:
             selected_data.extend(candidates)
 
+    # Step 2b: Count total points per experiment for weighting (Improvement 1.1)
+    exp_n_points_map: Dict[Tuple[str, str], int] = {}
+    if normalize_by_n_points:
+        for available_energy, df, meta in selected_data:
+            entry = meta.get('entry', 'unknown')
+            subentry = meta.get('subentry', 'unknown')
+            exp_key = (entry, subentry)
+            n_pts = len(df['angle'])
+            exp_n_points_map[exp_key] = exp_n_points_map.get(exp_key, 0) + n_pts
+
+    # Also track kernel weights per row for final assembly
+    all_kernel_weights: List[float] = []
+
     # Step 3: Process selected data (transform and build DataFrames)
     for available_energy, df, meta in selected_data:
-        # Uniform weight for bin method (no Gaussian decay)
-        kernel_weight = 1.0
-
         # Extract metadata (same as Gaussian kernel method)
         entry = meta.get('entry', 'unknown')
         subentry = meta.get('subentry', 'unknown')
+        exp_key = (entry, subentry)
+
+        n_points = len(df['angle'])
+
+        # Determine kernel weight per point (Improvement 1.1)
+        if normalize_by_n_points and exp_key in exp_n_points_map:
+            # Each point gets 1/n_points for this experiment
+            kernel_weight = 1.0 / exp_n_points_map[exp_key]
+        else:
+            # Uniform weight for bin method (no Gaussian decay)
+            kernel_weight = 1.0
+
+        # Extract metadata (same as Gaussian kernel method)
         frame = meta.get('angle_frame', 'CM').upper()
         reaction = meta.get('reaction', '')
 
@@ -1081,8 +1177,6 @@ def filter_exfor_with_energy_bin(
         angles_deg = df['angle'].to_numpy(dtype=float)
         dsig = df['dsig'].to_numpy(dtype=float)
         error_stat = df['error_stat'].to_numpy(dtype=float)
-
-        n_points = len(angles_deg)
 
         # Count how many energies this experiment had in the bin
         n_energies_in_bin = len(experiment_candidates[(entry, subentry)])
@@ -1130,6 +1224,9 @@ def filter_exfor_with_energy_bin(
 
         all_frames.append(transformed_df)
 
+        # Track kernel weights for each row in this dataframe
+        all_kernel_weights.extend([kernel_weight] * n_points)
+
         # Track experiment info with deduplication info
         exp_info = {
             'entry': entry,
@@ -1148,24 +1245,35 @@ def filter_exfor_with_energy_bin(
 
     # Concatenate all experiments
     result = pd.concat(all_frames, ignore_index=True)
-    kernel_weights = np.ones(len(result), dtype=float)  # All weights = 1.0
+    kernel_weights = np.array(all_kernel_weights, dtype=float)
 
     # Apply uncertainty floor if requested
     if min_relative_uncertainty > 0:
         result = apply_uncertainty_floor(result, min_relative_uncertainty, unc_column='unc', value_column='value')
 
-    # NO experiment capping for bin method
-
-    # Compute experiment weight fractions (for logging)
-    exp_weight_fracs = {}
-    total_points = float(len(result))
-    for exp in experiments_info:
-        key = f"{exp['entry']}.{exp['subentry']}"
-        exp_weight_fracs[key] = exp_weight_fracs.get(key, 0.0) + exp['n_points'] / total_points
+    # Apply per-experiment weight capping if requested (Improvement 1.1)
+    capping_applied = False
+    if max_experiment_weight_fraction < 1.0:
+        kernel_weights, exp_weight_fracs, capping_applied = apply_per_experiment_weight_cap(
+            result, kernel_weights, max_experiment_weight_fraction
+        )
+    else:
+        # Compute experiment weight fractions (for logging)
+        exp_weight_fracs = {}
+        total_weight = float(np.sum(kernel_weights))
+        if total_weight > 1e-30:
+            for exp in experiments_info:
+                key = f"{exp['entry']}.{exp['subentry']}"
+                # Sum weights for this experiment
+                exp_mask = (result['entry'] == exp['entry']) & (result['subentry'] == exp['subentry'])
+                exp_total = float(np.sum(kernel_weights[exp_mask.values]))
+                exp_weight_fracs[key] = exp_total / total_weight
 
     # Compute diagnostics
-    # For bin method: N_eff = N (since all weights are equal)
-    n_eff = float(len(result))
+    # N_eff = (sum w)^2 / sum(w^2)
+    total_weight = float(np.sum(kernel_weights))
+    sum_w_sq = float(np.sum(kernel_weights ** 2))
+    n_eff = (total_weight ** 2) / sum_w_sq if sum_w_sq > 1e-30 else float(len(result))
 
     # Weight span is the bin width
     weight_span = bin_upper_mev - bin_lower_mev if bin_upper_mev < float('inf') else 0.0
@@ -1178,7 +1286,7 @@ def filter_exfor_with_energy_bin(
         max_experiment_weight_frac=max(exp_weight_fracs.values()) if exp_weight_fracs else 0.0,
         experiment_weights=exp_weight_fracs,
         n_points_dropped=0,
-        capping_applied=False,
+        capping_applied=capping_applied,
     )
 
     return result, experiments_info, kernel_weights, diagnostics
@@ -1406,6 +1514,477 @@ def load_exfor_with_asymmetric_tolerance(
         n_experiments = 1
 
     return exfor_df, n_experiments
+
+
+# =============================================================================
+# ENERGY JITTER MC (Improvement 1.4)
+# =============================================================================
+
+def precompute_dataset_energy_info(
+    nominal_results: List,  # List[NominalFitResult]
+    tof_params_cache: Dict[str, Dict],
+    energy_bins: List[EnergyBinInfo],
+    default_flight_path_m: float = 27.037,
+    default_time_resolution_ns: float = 5.0,
+) -> Dict[int, List[DatasetEnergyInfo]]:
+    """
+    Precompute σE for all datasets across all bins.
+
+    This function prepares dataset information needed for the energy jitter MC:
+    - Extracts all datasets from nominal fit results
+    - Computes σE for each dataset using experiment-specific TOF parameters
+    - Maps datasets to their nominal (unperturbed) energy bins
+
+    Parameters
+    ----------
+    nominal_results : List[NominalFitResult]
+        Nominal fit results from Phase 1
+    tof_params_cache : Dict[str, Dict]
+        Pre-loaded TOF parameters from load_tof_parameters_file()
+    energy_bins : List[EnergyBinInfo]
+        List of energy bin info objects
+    default_flight_path_m : float
+        Default flight path in meters for fallback
+    default_time_resolution_ns : float
+        Default time resolution in nanoseconds for fallback
+
+    Returns
+    -------
+    Dict[int, List[DatasetEnergyInfo]]
+        Dictionary mapping bin index to list of DatasetEnergyInfo for datasets
+        whose nominal energy falls in that bin
+    """
+    from .tof_parameters import get_tof_parameters, compute_sigma_E, find_bin_for_energy
+
+    dataset_info_by_bin: Dict[int, List[DatasetEnergyInfo]] = {
+        bin_info.index: [] for bin_info in energy_bins
+    }
+
+    for nr in nominal_results:
+        if not nr.has_data or nr.interpolated:
+            continue
+
+        # Each experiment_info entry represents one dataset (experiment at one energy)
+        for exp_info in nr.experiments_info:
+            entry = exp_info.get('entry', 'unknown')
+            subentry = exp_info.get('subentry', 'unknown')
+            exfor_energy = exp_info.get('exfor_energy_mev', nr.energy_mev)
+            n_points = exp_info.get('n_points', 0)
+
+            # Get TOF parameters for this experiment
+            tof_params = get_tof_parameters(
+                subentry=f"{entry}{subentry}",  # Combined identifier
+                tof_params_cache=tof_params_cache,
+                default_flight_path_m=default_flight_path_m,
+                default_time_resolution_ns=default_time_resolution_ns,
+            )
+
+            # Compute σE at this dataset's energy
+            sigma_E = compute_sigma_E(exfor_energy, tof_params)
+
+            # Find nominal bin (the bin containing this dataset's energy)
+            nominal_bin_idx = find_bin_for_energy(exfor_energy, energy_bins)
+            if nominal_bin_idx is None:
+                # Dataset energy outside all bins - skip
+                continue
+
+            # Create dataset info
+            dataset_info = DatasetEnergyInfo(
+                entry=entry,
+                subentry=subentry,
+                nominal_energy_mev=exfor_energy,
+                sigma_E_mev=sigma_E,
+                nominal_bin_index=nominal_bin_idx,
+                exfor_df_indices=[],  # Populated if needed for building combined DataFrames
+                tof_source=tof_params.source,
+                n_points=n_points,
+            )
+
+            dataset_info_by_bin[nominal_bin_idx].append(dataset_info)
+
+    return dataset_info_by_bin
+
+
+def get_all_datasets_flat(
+    dataset_info_by_bin: Dict[int, List[DatasetEnergyInfo]],
+) -> List[DatasetEnergyInfo]:
+    """
+    Flatten dataset info from bin-grouped dict to single list.
+
+    Parameters
+    ----------
+    dataset_info_by_bin : Dict[int, List[DatasetEnergyInfo]]
+        Datasets grouped by nominal bin
+
+    Returns
+    -------
+    List[DatasetEnergyInfo]
+        All datasets as a flat list
+    """
+    all_datasets = []
+    for datasets in dataset_info_by_bin.values():
+        all_datasets.extend(datasets)
+    return all_datasets
+
+
+def run_mc_with_energy_jitter(
+    nominal_results: List,  # List[NominalFitResult]
+    energy_bins: List[EnergyBinInfo],
+    dataset_info_by_bin: Dict[int, List[DatasetEnergyInfo]],
+    exfor_cache: Dict[float, List[Tuple[pd.DataFrame, Dict]]],
+    sorted_energies: List[float],
+    n_samples: int,
+    base_seed: int,
+    max_degree: int,
+    ridge_lambda: float,
+    m_proj_u: float,
+    m_targ_u: float,
+    use_band_discrepancy: bool = True,
+    min_points_per_band: int = 3,
+    max_tau_fraction: float = 0.25,
+    jitter_n_sigma_clip: float = 3.0,
+    track_bin_jumps: bool = True,
+    min_relative_uncertainty: float = 0.0,
+    freeze_c0: bool = False,
+    sigma_norm: float = 0.0,
+    norm_dist: str = "lognormal",
+    logger=None,
+) -> Tuple[Dict[int, Dict[int, np.ndarray]], BinJumpDiagnostics]:
+    """
+    Run MC sampling with energy jitter for cross-bin correlation.
+
+    This implements Improvement 1.4: Instead of independent per-bin sampling,
+    this method samples E* ~ N(E_nom, σE) for each dataset and assigns it to
+    the containing bin, creating cross-bin coupling in the covariance matrix.
+
+    Key insight:
+    - Nominal fit: Uses energy_bin method unchanged (preserves resonance structure)
+    - MC sampling: Introduces energy jitter per dataset
+    - Effect: Creates cross-bin correlations useful for MF34
+
+    Algorithm:
+    1. For each MC sample:
+       a. For each dataset: sample E* ~ N(E_nom, σE), clip to ±n_sigma
+       b. Assign dataset to bin containing E*
+       c. For each bin: fit using jitter-assigned datasets
+
+    Parameters
+    ----------
+    nominal_results : List[NominalFitResult]
+        Nominal fit results from Phase 1 (provides frozen degrees and tau values)
+    energy_bins : List[EnergyBinInfo]
+        Energy bin information
+    dataset_info_by_bin : Dict[int, List[DatasetEnergyInfo]]
+        Pre-computed dataset information from precompute_dataset_energy_info()
+    exfor_cache : Dict[float, List[Tuple[pd.DataFrame, Dict]]]
+        Pre-loaded EXFOR data cache
+    sorted_energies : List[float]
+        Sorted list of available EXFOR energies
+    n_samples : int
+        Number of MC samples to generate
+    base_seed : int
+        Base random seed for reproducibility
+    max_degree : int
+        Maximum Legendre degree
+    ridge_lambda : float
+        Ridge regularization parameter
+    m_proj_u : float
+        Projectile mass in atomic mass units
+    m_targ_u : float
+        Target mass in atomic mass units
+    use_band_discrepancy : bool
+        Use angular-band discrepancy model
+    min_points_per_band : int
+        Minimum points per angular band
+    max_tau_fraction : float
+        Maximum tau as fraction of cross section
+    jitter_n_sigma_clip : float
+        Clip energy jitter at ±n_sigma (default: 3.0)
+    track_bin_jumps : bool
+        Track bin jump statistics for diagnostics
+    min_relative_uncertainty : float
+        Minimum relative uncertainty floor
+    freeze_c0 : bool
+        Fix c0 coefficient during fitting
+    sigma_norm : float
+        Per-experiment normalization uncertainty
+    norm_dist : str
+        Normalization distribution ("lognormal" or "normal")
+    logger : optional
+        Logger instance
+
+    Returns
+    -------
+    Tuple[Dict[int, Dict[int, np.ndarray]], BinJumpDiagnostics]
+        - all_samples: {sample_idx: {energy_index: endf_coeffs}}
+        - diagnostics: BinJumpDiagnostics with statistics
+    """
+    from .tof_parameters import find_bin_for_energy
+    from .resample_AD import sample_legendre_coefficients
+
+    # Initialize output structure
+    all_samples: Dict[int, Dict[int, np.ndarray]] = {}
+
+    # Get all datasets as flat list
+    all_datasets = get_all_datasets_flat(dataset_info_by_bin)
+
+    if logger:
+        logger.info(f"  Energy jitter MC: {n_samples} samples, {len(all_datasets)} datasets")
+        logger.info(f"  Jitter clipping: ±{jitter_n_sigma_clip}σ")
+
+    # Map nominal results by energy index for quick lookup
+    nominal_by_idx = {nr.energy_index: nr for nr in nominal_results if nr.has_data}
+
+    # Build dataset -> EXFOR data lookup
+    # Key: (entry, subentry, energy_mev) -> (df, meta)
+    dataset_exfor_lookup = {}
+    for energy_mev, entries in exfor_cache.items():
+        for df, meta in entries:
+            entry = meta.get('entry', 'unknown')
+            subentry = meta.get('subentry', 'unknown')
+            key = (entry, subentry, energy_mev)
+            dataset_exfor_lookup[key] = (df, meta)
+
+    # Tracking for bin jump diagnostics
+    total_assignments = 0
+    jumped_bins = 0
+    jump_counts: Dict[Tuple[int, int], int] = defaultdict(int)
+    datasets_outside_range = 0
+
+    # Generate MC samples
+    for s_idx in range(n_samples):
+        # Create sample-specific RNG
+        rng = np.random.default_rng(base_seed + s_idx * 1000)
+
+        # Step 1: Jitter all dataset energies and assign to bins
+        # bin_assignments: {bin_index: [(dataset, E_star), ...]}
+        bin_assignments: Dict[int, List[Tuple[DatasetEnergyInfo, float]]] = {
+            bin_info.index: [] for bin_info in energy_bins
+        }
+
+        for dataset in all_datasets:
+            # Sample jittered energy E* ~ N(E_nom, σE), clipped
+            z = np.clip(
+                rng.normal(0, 1),
+                -jitter_n_sigma_clip,
+                jitter_n_sigma_clip
+            )
+            E_star = dataset.nominal_energy_mev + z * dataset.sigma_E_mev
+
+            # Find containing bin
+            target_bin = find_bin_for_energy(E_star, energy_bins)
+
+            if target_bin is None:
+                # E* outside all bins
+                datasets_outside_range += 1
+                continue
+
+            total_assignments += 1
+
+            # Track jumps
+            if track_bin_jumps and target_bin != dataset.nominal_bin_index:
+                jumped_bins += 1
+                jump_key = (dataset.nominal_bin_index, target_bin)
+                jump_counts[jump_key] += 1
+
+            bin_assignments[target_bin].append((dataset, E_star))
+
+        # Step 2: Fit each bin using jitter-assigned datasets
+        sample_coeffs: Dict[int, np.ndarray] = {}
+
+        for bin_info in energy_bins:
+            assigned = bin_assignments[bin_info.index]
+
+            if not assigned:
+                # Empty bin after jitter - use nominal coefficients
+                if bin_info.index in nominal_by_idx:
+                    nr = nominal_by_idx[bin_info.index]
+                    endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+                else:
+                    # Isotropic fallback
+                    endf_coeffs = np.zeros(max_degree)
+                sample_coeffs[bin_info.index] = endf_coeffs
+                continue
+
+            # Build combined DataFrame from assigned datasets
+            frames = []
+            for dataset, E_star in assigned:
+                key = (dataset.entry, dataset.subentry, dataset.nominal_energy_mev)
+                if key not in dataset_exfor_lookup:
+                    continue
+
+                df, meta = dataset_exfor_lookup[key]
+
+                # Extract columns
+                angles_deg = df['angle'].to_numpy(dtype=float)
+                dsig = df['dsig'].to_numpy(dtype=float)
+                error_stat = df['error_stat'].to_numpy(dtype=float)
+
+                # Transform to CM if needed
+                frame = meta.get('angle_frame', 'CM').upper()
+                if frame == 'LAB':
+                    mu_lab = np.cos(np.deg2rad(angles_deg))
+                    mu_cm, dsig_cm, error_cm = transform_lab_to_cm(
+                        mu_lab, dsig, error_stat, m_proj_u, m_targ_u
+                    )
+                    angles_cm_deg = np.rad2deg(np.arccos(mu_cm))
+                else:
+                    mu_cm = np.cos(np.deg2rad(angles_deg))
+                    angles_cm_deg = angles_deg
+                    dsig_cm = dsig
+                    error_cm = error_stat
+
+                transformed_df = pd.DataFrame({
+                    'theta_deg': angles_cm_deg,
+                    'value': dsig_cm,
+                    'unc': error_cm,
+                    'mu': mu_cm,
+                    'entry': dataset.entry,
+                    'subentry': dataset.subentry,
+                    'exfor_energy_mev': E_star,
+                    'kernel_weight': 1.0,  # Uniform weights for energy_bin method
+                })
+                frames.append(transformed_df)
+
+            if not frames:
+                # No valid data after lookup
+                if bin_info.index in nominal_by_idx:
+                    nr = nominal_by_idx[bin_info.index]
+                    endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+                else:
+                    endf_coeffs = np.zeros(max_degree)
+                sample_coeffs[bin_info.index] = endf_coeffs
+                continue
+
+            combined_df = pd.concat(frames, ignore_index=True)
+
+            # Apply uncertainty floor if requested
+            if min_relative_uncertainty > 0:
+                combined_df = apply_uncertainty_floor(
+                    combined_df, min_relative_uncertainty,
+                    unc_column='unc', value_column='value'
+                )
+
+            # Get frozen degree from nominal fit
+            if bin_info.index in nominal_by_idx:
+                frozen_degree = nominal_by_idx[bin_info.index].frozen_degree
+            else:
+                frozen_degree = min(max_degree, len(combined_df) // 3)
+
+            if len(combined_df) < 3:
+                # Not enough points to fit
+                if bin_info.index in nominal_by_idx:
+                    nr = nominal_by_idx[bin_info.index]
+                    endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+                else:
+                    endf_coeffs = np.zeros(max_degree)
+                sample_coeffs[bin_info.index] = endf_coeffs
+                continue
+
+            # Fit Legendre coefficients
+            try:
+                coef_df, _ = sample_legendre_coefficients(
+                    combined_df,
+                    value_col="value",
+                    unc_col="unc",
+                    degree=frozen_degree,
+                    max_degree=max_degree,
+                    select_degree=None,  # Use frozen degree
+                    ridge_lambda=ridge_lambda,
+                    external_weights=combined_df['kernel_weight'].to_numpy(),
+                    n_samples=1,  # Just one sample per MC iteration
+                    random_state=base_seed + s_idx * 1000 + bin_info.index,
+                    use_band_discrepancy=use_band_discrepancy,
+                    min_points_per_band=min_points_per_band,
+                    max_tau_fraction=max_tau_fraction,
+                    freeze_c0=freeze_c0,
+                    sigma_norm=sigma_norm,
+                    norm_dist=norm_dist,
+                )
+
+                fit_coeffs = coef_df.iloc[0].to_numpy()
+                endf_coeffs = endf_normalize_legendre_coeffs(fit_coeffs, include_a0=False)
+
+            except Exception as e:
+                # Fallback to nominal on fit failure
+                if bin_info.index in nominal_by_idx:
+                    nr = nominal_by_idx[bin_info.index]
+                    endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
+                else:
+                    endf_coeffs = np.zeros(max_degree)
+
+            sample_coeffs[bin_info.index] = endf_coeffs
+
+        all_samples[s_idx] = sample_coeffs
+
+        # Progress logging
+        if logger and (s_idx + 1) % 10 == 0:
+            logger.info(f"    Sample {s_idx + 1}/{n_samples} completed")
+
+    # Compute bin jump diagnostics
+    jump_rate = jumped_bins / total_assignments if total_assignments > 0 else 0.0
+
+    diagnostics = BinJumpDiagnostics(
+        total_assignments=total_assignments,
+        jumped_bins=jumped_bins,
+        jump_rate=jump_rate,
+        jump_counts=dict(jump_counts),
+        datasets_outside_range=datasets_outside_range,
+    )
+
+    return all_samples, diagnostics
+
+
+def log_bin_jump_diagnostics(
+    diagnostics: BinJumpDiagnostics,
+    energy_bins: List[EnergyBinInfo],
+    logger=None,
+) -> None:
+    """
+    Log bin jump diagnostics in a readable format.
+
+    Parameters
+    ----------
+    diagnostics : BinJumpDiagnostics
+        Bin jump statistics from run_mc_with_energy_jitter
+    energy_bins : List[EnergyBinInfo]
+        Energy bin information (for energy labels)
+    logger : optional
+        Logger instance
+    """
+    if logger is None:
+        return
+
+    # Create bin index to energy mapping
+    idx_to_energy = {bin_info.index: bin_info.energy_mev for bin_info in energy_bins}
+
+    logger.info("")
+    logger.info("[BIN JUMP DIAGNOSTICS]")
+    logger.info(f"  Total assignments: {diagnostics.total_assignments}")
+    logger.info(f"  Jumped bins: {diagnostics.jumped_bins}")
+    logger.info(f"  Jump rate: {diagnostics.jump_rate * 100:.2f}%")
+
+    if diagnostics.datasets_outside_range > 0:
+        logger.info(f"  Datasets outside range: {diagnostics.datasets_outside_range}")
+
+    # Interpretation
+    if diagnostics.jump_rate > 0.30:
+        logger.info("  Interpretation: Grid finer than σE → strong energy correlations")
+    elif diagnostics.jump_rate > 0.10:
+        logger.info("  Interpretation: Grid comparable to σE → moderate correlations")
+    else:
+        logger.info("  Interpretation: Grid coarser than σE → weak correlations")
+
+    # Top jumps
+    top_jumps = diagnostics.top_jumps(5)
+    if top_jumps:
+        logger.info("  Top bin jumps:")
+        for (from_idx, to_idx), count in top_jumps:
+            from_e = idx_to_energy.get(from_idx, 0.0)
+            to_e = idx_to_energy.get(to_idx, 0.0)
+            logger.info(f"    {from_idx}→{to_idx} ({from_e:.4f}→{to_e:.4f} MeV): {count}")
+
+    logger.info("")
 
 
 # =============================================================================

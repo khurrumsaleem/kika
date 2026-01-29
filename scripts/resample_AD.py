@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, Literal, Tuple, Dict, Any, Sequence, List
+from dataclasses import dataclass, field
+from typing import Optional, Literal, Tuple, Dict, Any, Sequence, List, Union
 import sys
 from pathlib import Path
 
@@ -49,6 +49,57 @@ class FitResult:
 
 
 @dataclass
+class GlobalConvolutionSystem:
+    """System matrices and metadata for global convolution fit.
+
+    This dataclass stores all the components needed for both solving the
+    global convolution system and performing MC sampling. By storing the
+    system matrices, we can solve for the nominal fit once, then reuse
+    the same structure for MC sampling with perturbed observations.
+
+    Attributes
+    ----------
+    A : csr_matrix
+        Design matrix (n_data x n_params) mapping parameters to observations.
+        Each row corresponds to one EXFOR measurement, columns are Legendre
+        coefficients c_l(E_k) for all energies and orders.
+    M : csr_matrix or np.ndarray
+        Normal equations matrix A'WA + R (n_params x n_params).
+        This is the matrix to invert for solving the system.
+    y_vec : np.ndarray
+        Observation vector (n_data,) - measured cross sections.
+    sigma_vec : np.ndarray
+        Uncertainty vector (n_data,) - measurement uncertainties.
+    w : np.ndarray
+        Weights 1/sigma^2 (n_data,).
+    experiment_groups : Dict[int, List[int]]
+        Mapping experiment_id -> list of point indices in y_vec.
+        Used for applying correlated normalization in MC sampling.
+    data_points : List[Dict]
+        Full data point information including mu, y, sigma, weights, etc.
+    energy_idx_to_param_start : Dict[int, int]
+        Mapping energy_index -> starting parameter index in coeffs_vec.
+    n_energies : int
+        Number of ENDF energy bins in the fit.
+    n_coeffs : int
+        Number of Legendre coefficients per energy (max_degree + 1).
+    n_params : int
+        Total number of parameters (n_energies * n_coeffs).
+    """
+    A: csr_matrix
+    M: Any  # Union[np.ndarray, csr_matrix]
+    y_vec: np.ndarray
+    sigma_vec: np.ndarray
+    w: np.ndarray
+    experiment_groups: Dict[int, List[int]]
+    data_points: List[Dict]
+    energy_idx_to_param_start: Dict[int, int]
+    n_energies: int
+    n_coeffs: int
+    n_params: int
+
+
+@dataclass
 class GlobalFitDiagnostics:
     """Diagnostics for global convolution fit.
 
@@ -80,6 +131,14 @@ class GlobalFitDiagnostics:
         Fraction of nonzero entries in the design matrix
     energies_with_data : List[int]
         List of energy indices that have EXFOR data
+    weight_sum_min : float
+        Minimum weight sum across all datasets (for weight guard diagnostic)
+    truncated_datasets : List[Dict]
+        List of datasets with weight_sum < threshold (for weight guard diagnostic)
+    n_datasets_skipped : int
+        Number of datasets skipped due to severe truncation (weight_sum < 0.5)
+    l_dependent_power : float
+        Power used for ℓ-dependent regularization scaling
     """
     n_energies: int
     n_params: int
@@ -92,6 +151,10 @@ class GlobalFitDiagnostics:
     n_eff_per_energy: Dict[int, float]
     weight_matrix_sparsity: float
     energies_with_data: list
+    weight_sum_min: float = 1.0
+    truncated_datasets: List[Dict] = field(default_factory=list)
+    n_datasets_skipped: int = 0
+    l_dependent_power: float = 0.0
 
 
 # =============================================================================
@@ -545,6 +608,7 @@ def _weighted_ridge_fit(
     ridge_power: int = 4,
     df_method: Literal["naive", "hat"] = "hat",
     external_weights: Optional[np.ndarray] = None,
+    fixed_c0: Optional[float] = None,
 ) -> Tuple[np.ndarray, float, float, float]:
     """
     Fit y(mu) = sum_{l=0..L} c_l P_l(mu) using weighted least squares,
@@ -569,6 +633,9 @@ def _weighted_ridge_fit(
     external_weights : Optional[np.ndarray]
         Additional weights (e.g., Gaussian kernel weights g_ij).
         If provided, combined weight is: w_ij = g_ij / σ²_i
+    fixed_c0 : Optional[float]
+        If provided, fix c0 to this value and only fit c1..cL.
+        This enables shape-only refits where the total cross section is fixed.
 
     Returns
     -------
@@ -583,8 +650,6 @@ def _weighted_ridge_fit(
         raise ValueError("All sigma must be > 0.")
 
     n = mu.size
-    # Design matrix: N x (L+1)
-    A = legvander(mu, degree)  # columns P0..PL
 
     # Weighting: combine external weights with inverse variance
     if external_weights is not None:
@@ -592,6 +657,75 @@ def _weighted_ridge_fit(
     else:
         w = 1.0 / (sigma ** 2)
     sw = np.sqrt(w)
+
+    # Fixed-c0 mode: subtract constant term and fit only c1..cL
+    if fixed_c0 is not None:
+        # Subtract c0 from y (since P0(mu) = 1)
+        y_adj = y - fixed_c0
+
+        # Design matrix without P0 column: N x L (columns P1..PL only)
+        A_full = legvander(mu, degree)
+        if degree == 0:
+            # Edge case: degree=0 with fixed_c0 means nothing to fit
+            coeffs = np.array([fixed_c0])
+            yhat = np.full(n, fixed_c0)
+            chi2 = float(np.sum(((y - yhat) / sigma) ** 2))
+            eff_params = 0.0  # c0 is fixed, not fitted
+            dof = float(max(1, n))
+            return coeffs, chi2, dof, eff_params
+
+        A = A_full[:, 1:]  # columns P1..PL (size N x L)
+        Aw = A * sw[:, None]
+        yw = y_adj * sw
+
+        # Ridge penalty matrix (L x L), penalty on all terms (l=1..L)
+        if ridge_lambda > 0.0:
+            pen = np.array([float(l ** ridge_power) for l in range(1, degree + 1)])
+            R = np.diag(pen)
+        else:
+            R = np.zeros((degree, degree), dtype=float)
+
+        M = Aw.T @ Aw + ridge_lambda * R
+        rhs = Aw.T @ yw
+
+        # Solve for c1..cL
+        try:
+            coeffs_partial = np.linalg.solve(M, rhs)
+        except np.linalg.LinAlgError:
+            coeffs_partial, _, rank, _ = np.linalg.lstsq(M, rhs, rcond=None)
+            import warnings
+            warnings.warn(
+                f"Matrix M is rank-deficient (rank={rank}/{M.shape[0]}) for degree={degree} with fixed_c0. "
+                f"Using least-squares solution.",
+                RuntimeWarning,
+                stacklevel=2
+            )
+
+        # Return full vector [fixed_c0, c1, ..., cL]
+        coeffs = np.concatenate([[fixed_c0], coeffs_partial])
+
+        # Compute chi2 on original scale
+        yhat = A_full @ coeffs
+        chi2 = float(np.sum(((y - yhat) / sigma) ** 2))
+
+        # Degrees of freedom (c0 is fixed, so only L parameters fitted)
+        if df_method == "naive" or ridge_lambda <= 0.0:
+            eff_params = float(degree)  # Only c1..cL fitted
+            dof = float(max(1, n - degree))
+        else:
+            try:
+                Minv = np.linalg.inv(M)
+            except np.linalg.LinAlgError:
+                Minv = np.linalg.pinv(M)
+            H = Aw @ Minv @ Aw.T
+            eff_params = float(np.trace(H))
+            dof = float(max(1e-12, n - eff_params))
+
+        return coeffs, chi2, dof, eff_params
+
+    # Standard mode: fit all c0..cL
+    # Design matrix: N x (L+1)
+    A = legvander(mu, degree)  # columns P0..PL
     Aw = A * sw[:, None]
     yw = y * sw
 
@@ -691,6 +825,13 @@ def sample_legendre_coefficients(
     use_band_discrepancy: bool = False,
     min_points_per_band: int = 6,
     max_tau_fraction: float = 0.25,
+    # fixed-c0 mode (Improvement 1.2)
+    freeze_c0: bool = False,
+    fixed_c0_value: Optional[float] = None,
+    # correlated normalization uncertainty (Improvement 1.3)
+    sigma_norm: float = 0.0,
+    norm_group_cols: Tuple[str, ...] = ("entry", "subentry"),
+    norm_dist: Literal["lognormal", "normal"] = "lognormal",
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Fit Legendre coefficients c_l for y(mu) = sum c_l P_l(mu) and return samples.
@@ -727,6 +868,19 @@ def sample_legendre_coefficients(
         Minimum points per band for τ estimation
     max_tau_fraction : float
         Cap τ_b at this fraction of cross section
+    freeze_c0 : bool
+        If True, fix c0 to either fixed_c0_value (if provided) or the nominal fit c0.
+        This enables shape-only refits where MF3 is fixed and MF34 explains discrepancies.
+    fixed_c0_value : float, optional
+        Explicit value to fix c0 at. Only used if freeze_c0=True.
+    sigma_norm : float
+        Per-experiment normalization uncertainty (e.g., 0.05 for 5%).
+        Applies correlated multiplicative noise per experiment group in MC sampling.
+    norm_group_cols : Tuple[str, ...]
+        Column names used to group data by experiment (default: ("entry", "subentry"))
+    norm_dist : str
+        Distribution for normalization factor: "lognormal" (default, always positive)
+        or "normal" (can go negative for large sigma_norm).
 
     Returns
     -------
@@ -850,19 +1004,64 @@ def sample_legendre_coefficients(
 
     rng = np.random.default_rng(random_state)
 
+    # Handle freeze_c0 mode (Improvement 1.2)
+    c0_fix = None
+    if freeze_c0:
+        c0_fix = fixed_c0_value if fixed_c0_value is not None else float(coeffs0[0])
+        # Refit nominal with fixed_c0 to get consistent c1..cL
+        coeffs0, chi2_0, dof_0, k_0 = _weighted_ridge_fit(
+            mu, y, sigma, degree_use,
+            ridge_lambda=ridge_lambda,
+            ridge_power=ridge_power,
+            df_method=df_method,
+            external_weights=external_weights,
+            fixed_c0=c0_fix,
+        )
+        chi2_red = float(chi2_0 / max(1e-12, dof_0))
+
+    # Build group mapping for correlated normalization (Improvement 1.3)
+    group_indices: Dict[Tuple, List[int]] = {}
+    group_keys: List[Tuple] = []
+    if sigma_norm > 0.0:
+        # Check if required columns exist
+        available_cols = [col for col in norm_group_cols if col in work.columns]
+        if available_cols:
+            from collections import defaultdict
+            group_indices = defaultdict(list)
+            for i in range(n):
+                key = tuple(work[col].iloc[i] for col in available_cols)
+                group_indices[key].append(i)
+            group_keys = list(group_indices.keys())
+
     # Sampling fits
     samples = []
     if n_samples <= 1:
         samples.append(coeffs0)
     else:
         for _ in range(int(n_samples)):
-            y_s = y + rng.normal(loc=0.0, scale=sigma_eff, size=n)
+            y_s = y.copy()
+
+            # Apply correlated normalization uncertainty per experiment (Improvement 1.3)
+            if sigma_norm > 0.0 and group_keys:
+                for key in group_keys:
+                    indices = group_indices[key]
+                    if norm_dist == "lognormal":
+                        # Lognormal: always positive, multiplicative
+                        N_g = rng.lognormal(mean=0.0, sigma=sigma_norm)
+                    else:  # "normal"
+                        N_g = 1.0 + rng.normal(0.0, sigma_norm)
+                    y_s[indices] *= N_g
+
+            # Add pointwise noise
+            y_s = y_s + rng.normal(loc=0.0, scale=sigma_eff, size=n)
+
             coeffs_s, _, _, _ = _weighted_ridge_fit(
                 mu, y_s, sigma_eff, degree_use,
                 ridge_lambda=ridge_lambda,
                 ridge_power=ridge_power,
                 df_method=df_method,
                 external_weights=external_weights,
+                fixed_c0=c0_fix,  # Pass fixed c0 if freeze_c0=True
             )
             samples.append(coeffs_s)
 
@@ -886,6 +1085,11 @@ def sample_legendre_coefficients(
         use_band_discrepancy=use_band_discrepancy,
         # Model averaging info
         all_degrees_info=all_degrees_info if all_degrees_info else None,
+        # New info fields
+        freeze_c0=freeze_c0,
+        fixed_c0_value=c0_fix,
+        sigma_norm=sigma_norm,
+        n_experiments_for_norm=len(group_keys) if sigma_norm > 0.0 else 0,
     )
     return coef_df, info
 
@@ -995,7 +1199,7 @@ def _compute_energy_resolution_tof(
     return sigma_E
 
 
-def fit_legendre_global_convolution(
+def build_global_convolution_system(
     exfor_cache: Dict[float, List[Tuple[pd.DataFrame, Dict]]],
     sorted_energies: List[float],
     energy_bins: List,  # List[EnergyBinInfo] - imported from exfor_utils
@@ -1003,32 +1207,26 @@ def fit_legendre_global_convolution(
     n_sigma: float = 3.0,
     tikhonov_lambda: float = 0.001,
     min_kernel_weight_fraction: float = 1e-3,
+    min_weight_sum_threshold: float = 0.95,
     m_proj_u: float = 1.008665,
     m_targ_u: float = 55.93494,
     delta_t_ns: float = 10.0,
     flight_path_m: float = 27.037,
+    l_dependent_power: float = 2.0,
+    skip_c0_regularization: bool = True,
     logger=None,
-) -> Tuple[Dict[int, np.ndarray], GlobalFitDiagnostics]:
+) -> Tuple[GlobalConvolutionSystem, GlobalFitDiagnostics]:
     """
-    Fit Legendre coefficients globally across ALL energies using resolution convolution.
+    Build the global convolution system matrices (Steps A-C of global fit).
 
-    This method fits all ENDF energy points simultaneously, properly accounting for
-    energy resolution smearing. Each EXFOR measurement contributes to multiple ENDF
-    bins according to its resolution-weighted probability.
+    This function collects EXFOR data, builds the design matrix A and normal
+    equations matrix M = A'WA + R, ready for solving. The system can then be
+    passed to solve_global_convolution() for the nominal fit, or to
+    sample_global_convolution_mc() for Monte Carlo sampling.
 
-    Mathematical Model:
-        For a measurement at nominal energy E_j and angle μ_i:
-
-        y_ij ≈ Σ_k w_jk * (Σ_ℓ c_ℓ(E_k) * P_ℓ(μ_i))
-
-        where:
-        - c_ℓ(E_k) are Legendre coefficients at ENDF grid energy E_k
-        - w_jk = Φ((E_k,high - E_j)/σ_j) - Φ((E_k,low - E_j)/σ_j)
-        - P_ℓ(μ_i) is the Legendre polynomial
-
-    Tikhonov Regularization:
-        Enforces smooth energy dependence via second-difference penalty:
-        R = λ * Σ_ℓ Σ_k (c_ℓ(E_{k+1}) - 2*c_ℓ(E_k) + c_ℓ(E_{k-1}))²
+    Improvements implemented:
+    - Weight normalization guard (3.2): Skip datasets with severe truncation
+    - ℓ-dependent regularization (3.3): Scale penalty by ℓ^p
 
     Parameters
     ----------
@@ -1046,6 +1244,8 @@ def fit_legendre_global_convolution(
         Tikhonov regularization strength (default: 0.001)
     min_kernel_weight_fraction : float, optional
         Minimum weight threshold as fraction of max (default: 1e-3)
+    min_weight_sum_threshold : float, optional
+        Warn if weight_sum < this (default: 0.95). Skip if < 0.5.
     m_proj_u : float, optional
         Projectile mass in atomic mass units (default: 1.008665)
     m_targ_u : float, optional
@@ -1054,18 +1254,22 @@ def fit_legendre_global_convolution(
         Default time resolution in nanoseconds (default: 10.0)
     flight_path_m : float, optional
         Default flight path in meters (default: 27.037)
+    l_dependent_power : float, optional
+        Power p for ℓ-dependent regularization: λ_ℓ = λ * ℓ^p (default: 2.0)
+    skip_c0_regularization : bool, optional
+        If True, don't apply smoothing penalty to c0 coefficients (default: True)
     logger : optional
         Logger for diagnostic messages
 
     Returns
     -------
-    Tuple[Dict[int, np.ndarray], GlobalFitDiagnostics]
-        - Dict mapping energy_index -> array of coefficients [c_0, c_1, ..., c_L]
-        - GlobalFitDiagnostics with fit quality information
+    Tuple[GlobalConvolutionSystem, GlobalFitDiagnostics]
+        - GlobalConvolutionSystem containing matrices and metadata
+        - GlobalFitDiagnostics with preliminary diagnostics (chi2 not yet computed)
     """
     if logger:
         logger.info("=" * 60)
-        logger.info("GLOBAL CONVOLUTION FIT")
+        logger.info("BUILDING GLOBAL CONVOLUTION SYSTEM")
         logger.info("=" * 60)
 
     n_energies = len(energy_bins)
@@ -1083,12 +1287,17 @@ def fit_legendre_global_convolution(
     if logger:
         logger.info("Step A: Collecting EXFOR data and computing energy weights...")
 
-    # Data structure: list of (mu, y, sigma, weights_to_bins, exfor_energy, experiment_id)
     data_points = []
+    experiment_groups: Dict[int, List[int]] = {}  # experiment_id -> point indices
     experiment_id_counter = 0
 
     # Track which energy bins have contributing data
     data_per_energy = {bin_info.index: [] for bin_info in energy_bins}
+
+    # Weight guard diagnostics (Improvement 3.2)
+    weight_sum_min = 1.0
+    truncated_datasets: List[Dict] = []
+    n_datasets_skipped = 0
 
     for exfor_energy in sorted_energies:
         if exfor_energy not in exfor_cache:
@@ -1103,7 +1312,6 @@ def fit_legendre_global_convolution(
             if resolution_inputs:
                 delta_t = resolution_inputs.get('delta_t_ns')
                 flight_path = resolution_inputs.get('flight_path_m')
-                # Fall back to defaults if values are None
                 if delta_t is None:
                     delta_t = delta_t_ns
                 if flight_path is None:
@@ -1152,15 +1360,43 @@ def fit_legendre_global_convolution(
                 if w >= min_kernel_weight_fraction:
                     weights_to_bins[bin_info.index] = w
 
+            # Weight normalization guard (Improvement 3.2)
+            weight_sum_before_norm = sum(weights_to_bins.values())
+
+            # Track minimum weight sum
+            if weight_sum_before_norm > 0:
+                weight_sum_min = min(weight_sum_min, weight_sum_before_norm)
+
+            # Check for severe truncation
+            if weight_sum_before_norm < 0.5:
+                # Severe truncation - skip this dataset entirely
+                if logger:
+                    logger.warning(
+                        f"Skipping E={exfor_energy:.4f} MeV (weight_sum={weight_sum_before_norm:.3f} < 0.5)"
+                    )
+                n_datasets_skipped += 1
+                experiment_id_counter += 1
+                continue
+            elif weight_sum_before_norm < min_weight_sum_threshold:
+                # Moderate truncation - track but don't skip
+                truncated_datasets.append({
+                    'energy': exfor_energy,
+                    'weight_sum': weight_sum_before_norm,
+                    'experiment_id': experiment_id_counter,
+                })
+
             # Normalize weights to sum to 1
-            weight_sum = sum(weights_to_bins.values())
-            if weight_sum > 0:
+            if weight_sum_before_norm > 0:
                 for k in weights_to_bins:
-                    weights_to_bins[k] /= weight_sum
+                    weights_to_bins[k] /= weight_sum_before_norm
+
+                # Initialize experiment group
+                experiment_groups[experiment_id_counter] = []
 
                 # Add each angular measurement as a data point
                 for i in range(len(mu_cm)):
                     if np.isfinite(mu_cm[i]) and np.isfinite(dsig_cm[i]) and error_cm[i] > 0:
+                        point_idx = len(data_points)
                         data_points.append({
                             'mu': mu_cm[i],
                             'y': dsig_cm[i],
@@ -1171,23 +1407,46 @@ def fit_legendre_global_convolution(
                         })
                         # Track which bins this point contributes to
                         for energy_idx in weights_to_bins:
-                            data_per_energy[energy_idx].append(len(data_points) - 1)
+                            data_per_energy[energy_idx].append(point_idx)
+                        # Track experiment membership
+                        experiment_groups[experiment_id_counter].append(point_idx)
 
             experiment_id_counter += 1
 
     n_data = len(data_points)
     if logger:
         logger.info(f"  Collected {n_data} data points from {experiment_id_counter} experiments")
+        if n_datasets_skipped > 0:
+            logger.info(f"  Skipped {n_datasets_skipped} datasets due to severe edge truncation")
+        if truncated_datasets:
+            logger.info(f"  {len(truncated_datasets)} datasets with moderate truncation (tracked)")
 
     if n_data == 0:
         if logger:
-            logger.warning("  No EXFOR data found! Returning empty results.")
-        return {}, GlobalFitDiagnostics(
+            logger.warning("  No EXFOR data found! Returning empty system.")
+        # Return empty system
+        empty_system = GlobalConvolutionSystem(
+            A=csr_matrix((0, n_params)),
+            M=csr_matrix((n_params, n_params)),
+            y_vec=np.array([]),
+            sigma_vec=np.array([]),
+            w=np.array([]),
+            experiment_groups={},
+            data_points=[],
+            energy_idx_to_param_start=energy_idx_to_param_start,
+            n_energies=n_energies,
+            n_coeffs=n_coeffs,
+            n_params=n_params,
+        )
+        empty_diag = GlobalFitDiagnostics(
             n_energies=n_energies, n_params=n_params, n_data_points=0,
             max_degree=max_degree, tikhonov_lambda=tikhonov_lambda,
             condition_number=0.0, chi2=0.0, chi2_per_energy={}, n_eff_per_energy={},
-            weight_matrix_sparsity=0.0, energies_with_data=[]
+            weight_matrix_sparsity=0.0, energies_with_data=[],
+            weight_sum_min=weight_sum_min, truncated_datasets=truncated_datasets,
+            n_datasets_skipped=n_datasets_skipped, l_dependent_power=l_dependent_power,
         )
+        return empty_system, empty_diag
 
     # ---------------------------------------------------------------------
     # STEP B: Build sparse design matrix A
@@ -1226,20 +1485,28 @@ def fit_legendre_global_convolution(
         logger.info(f"  Nonzero elements: {nonzero_count} ({100*(1-sparsity):.2f}% density)")
 
     # ---------------------------------------------------------------------
-    # STEP C: Build Tikhonov regularization matrix for energy smoothness
+    # STEP C: Build Tikhonov regularization matrix with ℓ-dependent scaling
     # ---------------------------------------------------------------------
     if logger:
         logger.info("Step C: Building Tikhonov regularization matrix...")
+        logger.info(f"  ℓ-dependent power: {l_dependent_power}")
+        logger.info(f"  Skip c0 regularization: {skip_c0_regularization}")
 
     # Second-difference penalty: (c_ℓ(k+1) - 2*c_ℓ(k) + c_ℓ(k-1))²
-    # Build matrix D such that D @ x gives the second differences
+    # With ℓ-dependent scaling: penalty for ℓ is λ * ℓ^p
     n_interior = n_energies - 2  # number of interior points
     if n_interior > 0 and tikhonov_lambda > 0:
-        # For each coefficient l, we have n_interior second-difference constraints
         n_reg_rows = n_interior * n_coeffs
         D = lil_matrix((n_reg_rows, n_params), dtype=float)
 
         for l in range(n_coeffs):
+            # ℓ-dependent scaling (Improvement 3.3)
+            # sqrt because R = D'D, so actual penalty is l_scale^2 = l^p
+            if l == 0 and skip_c0_regularization:
+                l_scale = 0.0
+            else:
+                l_scale = np.sqrt(l ** l_dependent_power) if l > 0 else 1.0
+
             for k in range(1, n_energies - 1):  # interior points
                 row_idx = l * n_interior + (k - 1)
                 # Indices in parameter vector
@@ -1247,9 +1514,9 @@ def fit_legendre_global_convolution(
                 idx_k = k * n_coeffs + l          # c_l(E_k)
                 idx_kp1 = (k + 1) * n_coeffs + l  # c_l(E_{k+1})
 
-                D[row_idx, idx_km1] = 1.0
-                D[row_idx, idx_k] = -2.0
-                D[row_idx, idx_kp1] = 1.0
+                D[row_idx, idx_km1] = l_scale * 1.0
+                D[row_idx, idx_k] = l_scale * (-2.0)
+                D[row_idx, idx_kp1] = l_scale * 1.0
 
         D = D.tocsr()
         R = tikhonov_lambda * (D.T @ D)
@@ -1257,95 +1524,50 @@ def fit_legendre_global_convolution(
         R = csr_matrix((n_params, n_params), dtype=float)
 
     # ---------------------------------------------------------------------
-    # STEP D: Solve weighted least squares
+    # Build weights and normal equations matrix M
     # ---------------------------------------------------------------------
-    if logger:
-        logger.info("Step D: Solving weighted least squares system...")
-
-    # Weighted design matrix: W = diag(1/sigma²)
     w = 1.0 / (sigma_vec ** 2)
     sqrt_w = np.sqrt(w)
 
     # Weighted system: (A'WA + R) x = A'W y
-    # Compute A'WA using sparse operations
-    Aw = A.multiply(sqrt_w[:, np.newaxis])  # Each row scaled by sqrt(w_i)
+    Aw = A.multiply(sqrt_w[:, np.newaxis])
     AtwA = Aw.T @ Aw
 
     # Normal equations matrix
     M = AtwA + R
 
-    # Convert to dense for solving (if matrix is not too large)
+    # Condition number estimate
     if n_params <= 5000:
-        M_dense = M.toarray()
-        # Right-hand side: A' W y
-        rhs = A.T @ (w * y_vec)
-
-        # Condition number estimate
         try:
+            M_dense = M.toarray()
             cond = np.linalg.cond(M_dense)
         except:
             cond = np.inf
-
-        if cond < 1e12:
-            # Direct solve
-            try:
-                coeffs_vec = np.linalg.solve(M_dense, rhs)
-                solve_method = "direct"
-            except np.linalg.LinAlgError:
-                # Fallback to least squares
-                coeffs_vec, *_ = np.linalg.lstsq(M_dense, rhs, rcond=None)
-                solve_method = "lstsq"
-        else:
-            # Use sparse iterative solver
-            coeffs_vec, *info = lsqr(M, rhs)[:2]
-            solve_method = "lsqr"
     else:
-        # Large system - use sparse solver
-        rhs = A.T @ (w * y_vec)
-        coeffs_vec, *info = lsqr(M, rhs)[:2]
-        cond = np.inf  # Don't compute for large systems
-        solve_method = "lsqr"
+        cond = np.inf
 
     if logger:
-        logger.info(f"  Solve method: {solve_method}, condition number: {cond:.2e}")
+        logger.info(f"  Condition number: {cond:.2e}")
 
-    # ---------------------------------------------------------------------
-    # STEP E: Compute diagnostics and reshape output
-    # ---------------------------------------------------------------------
-    if logger:
-        logger.info("Step E: Computing diagnostics and reshaping output...")
+    # Build system object
+    system = GlobalConvolutionSystem(
+        A=A,
+        M=M,
+        y_vec=y_vec,
+        sigma_vec=sigma_vec,
+        w=w,
+        experiment_groups=experiment_groups,
+        data_points=data_points,
+        energy_idx_to_param_start=energy_idx_to_param_start,
+        n_energies=n_energies,
+        n_coeffs=n_coeffs,
+        n_params=n_params,
+    )
 
-    # Compute residuals and chi-squared
-    y_pred = A @ coeffs_vec
-    residuals = (y_vec - y_pred) / sigma_vec
-    chi2_total = float(np.sum(residuals ** 2))
+    # Compute preliminary diagnostics (chi2 will be computed after solving)
+    energies_with_data = [bin_info.index for bin_info in energy_bins
+                         if len(data_per_energy[bin_info.index]) > 0]
 
-    # Per-energy chi-squared and N_eff
-    chi2_per_energy = {}
-    n_eff_per_energy = {}
-    energies_with_data = []
-
-    for bin_info in energy_bins:
-        point_indices = data_per_energy[bin_info.index]
-        if len(point_indices) > 0:
-            energies_with_data.append(bin_info.index)
-            # Chi-squared for this energy
-            chi2_energy = float(np.sum(residuals[point_indices] ** 2))
-            chi2_per_energy[bin_info.index] = chi2_energy
-
-            # Effective sample size
-            w_energy = w[point_indices]
-            n_eff = (np.sum(w_energy) ** 2) / np.sum(w_energy ** 2) if np.sum(w_energy ** 2) > 0 else 0
-            n_eff_per_energy[bin_info.index] = float(n_eff)
-
-    # Reshape coefficients into dict by energy
-    coeffs_by_energy = {}
-    for bin_info in energy_bins:
-        param_start = energy_idx_to_param_start[bin_info.index]
-        coeffs = coeffs_vec[param_start:param_start + n_coeffs]
-        coeffs_by_energy[bin_info.index] = coeffs
-
-    # Build diagnostics
     diagnostics = GlobalFitDiagnostics(
         n_energies=n_energies,
         n_params=n_params,
@@ -1353,19 +1575,758 @@ def fit_legendre_global_convolution(
         max_degree=max_degree,
         tikhonov_lambda=tikhonov_lambda,
         condition_number=float(cond) if np.isfinite(cond) else -1.0,
-        chi2=chi2_total,
-        chi2_per_energy=chi2_per_energy,
-        n_eff_per_energy=n_eff_per_energy,
+        chi2=0.0,  # Will be computed after solving
+        chi2_per_energy={},  # Will be computed after solving
+        n_eff_per_energy={},  # Will be computed after solving
         weight_matrix_sparsity=sparsity,
         energies_with_data=energies_with_data,
+        weight_sum_min=weight_sum_min,
+        truncated_datasets=truncated_datasets,
+        n_datasets_skipped=n_datasets_skipped,
+        l_dependent_power=l_dependent_power,
     )
 
     if logger:
-        logger.info(f"  Total chi² = {chi2_total:.2f}, Energies with data: {len(energies_with_data)}/{n_energies}")
-        logger.info("Global convolution fit complete.")
+        logger.info("System build complete.")
         logger.info("=" * 60)
 
-    return coeffs_by_energy, diagnostics
+    return system, diagnostics
+
+
+def solve_global_convolution(
+    system: GlobalConvolutionSystem,
+    y_vec: Optional[np.ndarray] = None,
+    logger=None,
+) -> np.ndarray:
+    """
+    Solve the global convolution system for coefficients.
+
+    This function solves M x = A'W y for the Legendre coefficients vector.
+    Can be used with the original observations (y_vec=None) or with
+    perturbed observations for MC sampling.
+
+    Parameters
+    ----------
+    system : GlobalConvolutionSystem
+        The system matrices from build_global_convolution_system()
+    y_vec : np.ndarray, optional
+        Observation vector to use. If None, uses system.y_vec (nominal fit).
+    logger : optional
+        Logger for diagnostic messages
+
+    Returns
+    -------
+    np.ndarray
+        Coefficient vector of shape (n_params,)
+    """
+    if y_vec is None:
+        y_vec = system.y_vec
+
+    # Right-hand side: A' W y
+    rhs = system.A.T @ (system.w * y_vec)
+
+    # Solve the system
+    n_params = system.n_params
+    M = system.M
+
+    if n_params <= 5000:
+        M_dense = M.toarray() if hasattr(M, 'toarray') else M
+        try:
+            cond = np.linalg.cond(M_dense)
+        except:
+            cond = np.inf
+
+        if cond < 1e12:
+            try:
+                coeffs_vec = np.linalg.solve(M_dense, rhs)
+            except np.linalg.LinAlgError:
+                coeffs_vec, *_ = np.linalg.lstsq(M_dense, rhs, rcond=None)
+        else:
+            coeffs_vec, *_ = lsqr(M, rhs)[:2]
+    else:
+        coeffs_vec, *_ = lsqr(M, rhs)[:2]
+
+    return coeffs_vec
+
+
+def solve_global_convolution_shape_only(
+    system: GlobalConvolutionSystem,
+    c0_frozen: Dict[int, float],
+    tikhonov_lambda: float = 0.001,
+    l_dependent_power: float = 2.0,
+    logger=None,
+) -> np.ndarray:
+    """
+    Solve global convolution with frozen c0 coefficients (shape-only fit).
+
+    Pass 2 of two-pass fit: c0 values are fixed from Pass 1, only c1..cL are optimized.
+    This allows the total cross section to be determined by the full fit, while the
+    shape parameters are refined in a second pass.
+
+    Parameters
+    ----------
+    system : GlobalConvolutionSystem
+        The system matrices from build_global_convolution_system()
+    c0_frozen : Dict[int, float]
+        Mapping energy_index -> c0 value from Pass 1
+    tikhonov_lambda : float, optional
+        Tikhonov regularization strength (default: 0.001)
+    l_dependent_power : float, optional
+        Power p for ℓ-dependent regularization: λ_ℓ = λ * ℓ^p (default: 2.0)
+    logger : optional
+        Logger for diagnostic messages
+
+    Returns
+    -------
+    np.ndarray
+        Full coefficient vector of shape (n_params,) with frozen c0 and optimized c1..cL
+    """
+    if logger:
+        logger.info("Solving shape-only system (c0 frozen from Pass 1)...")
+
+    n_coeffs = system.n_coeffs  # L+1 (includes c0)
+    n_coeffs_shape = n_coeffs - 1  # L (c1..cL only)
+    n_params_shape = system.n_energies * n_coeffs_shape
+
+    if n_coeffs_shape == 0:
+        # Only c0, nothing to optimize
+        if logger:
+            logger.warning("  No shape parameters to optimize (max_degree=0)")
+        return solve_global_convolution(system, logger=logger)
+
+    # -------------------------------------------------------------------------
+    # A. Build reduced design matrix A_shape (remove c0 columns)
+    # -------------------------------------------------------------------------
+    A_lil = system.A.tolil()
+    A_shape_lil = lil_matrix((system.A.shape[0], n_params_shape), dtype=float)
+
+    # Build mapping from energy_index to position (0-based in sorted order)
+    energy_idx_to_pos = {}
+    for energy_idx, param_start in system.energy_idx_to_param_start.items():
+        energy_pos = param_start // n_coeffs
+        energy_idx_to_pos[energy_idx] = energy_pos
+
+    # Copy non-c0 columns with remapped indices
+    for energy_idx, param_start in system.energy_idx_to_param_start.items():
+        energy_pos = energy_idx_to_pos[energy_idx]
+        new_start = energy_pos * n_coeffs_shape
+        for l in range(1, n_coeffs):  # Skip l=0 (c0)
+            A_shape_lil[:, new_start + (l - 1)] = A_lil[:, param_start + l]
+
+    A_shape = A_shape_lil.tocsr()
+
+    # -------------------------------------------------------------------------
+    # B. Compute c0 contribution and subtract from observations
+    # -------------------------------------------------------------------------
+    c0_contrib = np.zeros(len(system.y_vec))
+    for i, dp in enumerate(system.data_points):
+        for energy_idx, w_jk in dp['weights'].items():
+            if energy_idx in c0_frozen:
+                c0_contrib[i] += w_jk * c0_frozen[energy_idx]
+
+    y_shape = system.y_vec - c0_contrib
+
+    # -------------------------------------------------------------------------
+    # C. Build shape-only regularization matrix R_shape
+    # -------------------------------------------------------------------------
+    n_interior = system.n_energies - 2
+    if n_interior > 0 and tikhonov_lambda > 0:
+        n_reg_rows = n_interior * n_coeffs_shape
+        D_shape = lil_matrix((n_reg_rows, n_params_shape), dtype=float)
+
+        for l_shape in range(n_coeffs_shape):  # l_shape=0 means c1, etc.
+            l_actual = l_shape + 1  # c1=1, c2=2, etc.
+            # ℓ-dependent scaling: sqrt because R = D'D
+            l_scale = np.sqrt(l_actual ** l_dependent_power)
+
+            for k in range(1, system.n_energies - 1):  # interior points
+                row_idx = l_shape * n_interior + (k - 1)
+                # Indices in shape parameter vector
+                idx_km1 = (k - 1) * n_coeffs_shape + l_shape
+                idx_k = k * n_coeffs_shape + l_shape
+                idx_kp1 = (k + 1) * n_coeffs_shape + l_shape
+
+                D_shape[row_idx, idx_km1] = l_scale * 1.0
+                D_shape[row_idx, idx_k] = l_scale * (-2.0)
+                D_shape[row_idx, idx_kp1] = l_scale * 1.0
+
+        D_shape = D_shape.tocsr()
+        R_shape = tikhonov_lambda * (D_shape.T @ D_shape)
+    else:
+        R_shape = csr_matrix((n_params_shape, n_params_shape), dtype=float)
+
+    # -------------------------------------------------------------------------
+    # D. Build and solve reduced normal equations
+    # -------------------------------------------------------------------------
+    sqrt_w = np.sqrt(system.w)
+    Aw_shape = A_shape.multiply(sqrt_w[:, np.newaxis])
+    M_shape = Aw_shape.T @ Aw_shape + R_shape
+    rhs_shape = A_shape.T @ (system.w * y_shape)
+
+    # Solve the reduced system
+    if n_params_shape <= 5000:
+        M_dense = M_shape.toarray() if hasattr(M_shape, 'toarray') else M_shape
+        try:
+            cond = np.linalg.cond(M_dense)
+        except:
+            cond = np.inf
+
+        if cond < 1e12:
+            try:
+                coeffs_shape = np.linalg.solve(M_dense, rhs_shape)
+            except np.linalg.LinAlgError:
+                coeffs_shape, *_ = np.linalg.lstsq(M_dense, rhs_shape, rcond=None)
+        else:
+            coeffs_shape, *_ = lsqr(M_shape, rhs_shape)[:2]
+    else:
+        coeffs_shape, *_ = lsqr(M_shape, rhs_shape)[:2]
+
+    # -------------------------------------------------------------------------
+    # E. Reconstruct full coefficient vector
+    # -------------------------------------------------------------------------
+    coeffs_full = np.zeros(system.n_params)
+
+    for energy_idx, c0_val in c0_frozen.items():
+        if energy_idx not in system.energy_idx_to_param_start:
+            continue
+        param_start = system.energy_idx_to_param_start[energy_idx]
+        energy_pos = energy_idx_to_pos[energy_idx]
+        shape_start = energy_pos * n_coeffs_shape
+
+        # c0 (frozen from Pass 1)
+        coeffs_full[param_start] = c0_val
+        # c1..cL (optimized in Pass 2)
+        coeffs_full[param_start + 1:param_start + n_coeffs] = \
+            coeffs_shape[shape_start:shape_start + n_coeffs_shape]
+
+    if logger:
+        logger.info("  Shape-only solve complete")
+
+    return coeffs_full
+
+
+def sample_global_convolution_mc(
+    system: GlobalConvolutionSystem,
+    n_samples: int,
+    sigma_norm: float = 0.05,
+    seed: Optional[int] = None,
+    logger=None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Generate MC samples from the global convolution system.
+
+    This function implements proper Monte Carlo sampling for the global fit
+    by perturbing observations with:
+    1. Experiment-level correlated normalization (Improvement 3.5)
+    2. Pointwise statistical noise
+
+    Parameters
+    ----------
+    system : GlobalConvolutionSystem
+        The system matrices from build_global_convolution_system()
+    n_samples : int
+        Number of MC samples to generate
+    sigma_norm : float, optional
+        Per-experiment normalization uncertainty (e.g., 0.05 for 5%)
+    seed : Optional[int], optional
+        Random seed for reproducibility
+    logger : optional
+        Logger for diagnostic messages
+
+    Returns
+    -------
+    Tuple[np.ndarray, Dict[str, Any]]
+        - Array of shape (n_samples, n_params) with sampled coefficient vectors
+        - Dictionary with sampling diagnostics
+    """
+    if logger:
+        logger.info(f"Generating {n_samples} MC samples with global convolution...")
+        logger.info(f"  Experiment normalization σ: {sigma_norm}")
+
+    rng = np.random.default_rng(seed)
+
+    n_data = len(system.y_vec)
+    n_params = system.n_params
+
+    all_samples = np.zeros((n_samples, n_params))
+
+    # Track normalization factors for diagnostics
+    norm_factors_by_sample = []
+
+    for s_idx in range(n_samples):
+        # Start with copy of original observations
+        y_s = system.y_vec.copy()
+
+        # Apply experiment-level correlated normalization (Improvement 3.5)
+        if sigma_norm > 0.0 and system.experiment_groups:
+            norm_factors = {}
+            for exp_id, point_indices in system.experiment_groups.items():
+                if len(point_indices) > 0:
+                    # Lognormal normalization factor (always positive)
+                    N_exp = rng.lognormal(mean=0.0, sigma=sigma_norm)
+                    norm_factors[exp_id] = N_exp
+                    y_s[point_indices] *= N_exp
+            norm_factors_by_sample.append(norm_factors)
+
+        # Add pointwise statistical noise
+        y_s += rng.normal(0, system.sigma_vec)
+
+        # Solve for this sample
+        coeffs_s = solve_global_convolution(system, y_vec=y_s)
+        all_samples[s_idx, :] = coeffs_s
+
+    # Compute diagnostics
+    diagnostics = {
+        'n_samples': n_samples,
+        'sigma_norm': sigma_norm,
+        'n_experiments': len(system.experiment_groups),
+        'n_data_points': n_data,
+    }
+
+    # Compute coefficient statistics
+    coeffs_mean = np.mean(all_samples, axis=0)
+    coeffs_std = np.std(all_samples, axis=0)
+    diagnostics['coeffs_mean_std_ratio'] = np.mean(coeffs_std / (np.abs(coeffs_mean) + 1e-10))
+
+    if logger:
+        logger.info(f"  MC sampling complete")
+        logger.info(f"  Mean coeff std/mean ratio: {diagnostics['coeffs_mean_std_ratio']:.4f}")
+
+    return all_samples, diagnostics
+
+
+def sample_global_convolution_mc_shape_only(
+    system: GlobalConvolutionSystem,
+    c0_frozen: Dict[int, float],
+    n_samples: int,
+    sigma_norm: float = 0.05,
+    tikhonov_lambda: float = 0.001,
+    l_dependent_power: float = 2.0,
+    seed: Optional[int] = None,
+    logger=None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    MC sampling with frozen c0: only c1..cL are sampled.
+
+    This is the shape-only variant of MC sampling where c0 values are fixed
+    from the nominal fit (Pass 1) and only the shape parameters (c1..cL)
+    vary across samples.
+
+    Parameters
+    ----------
+    system : GlobalConvolutionSystem
+        The system matrices from build_global_convolution_system()
+    c0_frozen : Dict[int, float]
+        Mapping energy_index -> c0 value (frozen from nominal fit)
+    n_samples : int
+        Number of MC samples to generate
+    sigma_norm : float, optional
+        Per-experiment normalization uncertainty (e.g., 0.05 for 5%)
+    tikhonov_lambda : float, optional
+        Tikhonov regularization strength (default: 0.001)
+    l_dependent_power : float, optional
+        Power p for ℓ-dependent regularization (default: 2.0)
+    seed : Optional[int], optional
+        Random seed for reproducibility
+    logger : optional
+        Logger for diagnostic messages
+
+    Returns
+    -------
+    Tuple[np.ndarray, Dict[str, Any]]
+        - Array of shape (n_samples, n_params) with sampled coefficient vectors
+          (c0 fixed, c1..cL varying)
+        - Dictionary with sampling diagnostics
+    """
+    if logger:
+        logger.info(f"Generating {n_samples} MC samples (shape-only, c0 frozen)...")
+        logger.info(f"  Experiment normalization σ: {sigma_norm}")
+
+    rng = np.random.default_rng(seed)
+
+    n_data = len(system.y_vec)
+    n_params = system.n_params
+    n_coeffs = system.n_coeffs
+    n_coeffs_shape = n_coeffs - 1
+
+    if n_coeffs_shape == 0:
+        # Only c0, return deterministic samples
+        if logger:
+            logger.warning("  No shape parameters to sample (max_degree=0)")
+        coeffs_nominal = solve_global_convolution(system)
+        all_samples = np.tile(coeffs_nominal, (n_samples, 1))
+        diagnostics = {
+            'n_samples': n_samples,
+            'sigma_norm': sigma_norm,
+            'shape_only': True,
+            'c0_frozen': True,
+        }
+        return all_samples, diagnostics
+
+    # Precompute c0 contribution (constant across all samples)
+    c0_contrib = np.zeros(n_data)
+    for i, dp in enumerate(system.data_points):
+        for energy_idx, w_jk in dp['weights'].items():
+            if energy_idx in c0_frozen:
+                c0_contrib[i] += w_jk * c0_frozen[energy_idx]
+
+    # Build mapping from energy_index to position
+    energy_idx_to_pos = {}
+    for energy_idx, param_start in system.energy_idx_to_param_start.items():
+        energy_pos = param_start // n_coeffs
+        energy_idx_to_pos[energy_idx] = energy_pos
+
+    # Build A_shape (remove c0 columns) - done once
+    n_params_shape = system.n_energies * n_coeffs_shape
+    A_lil = system.A.tolil()
+    A_shape_lil = lil_matrix((n_data, n_params_shape), dtype=float)
+
+    for energy_idx, param_start in system.energy_idx_to_param_start.items():
+        energy_pos = energy_idx_to_pos[energy_idx]
+        new_start = energy_pos * n_coeffs_shape
+        for l in range(1, n_coeffs):
+            A_shape_lil[:, new_start + (l - 1)] = A_lil[:, param_start + l]
+
+    A_shape = A_shape_lil.tocsr()
+
+    # Build R_shape (regularization for c1..cL only) - done once
+    n_interior = system.n_energies - 2
+    if n_interior > 0 and tikhonov_lambda > 0:
+        n_reg_rows = n_interior * n_coeffs_shape
+        D_shape = lil_matrix((n_reg_rows, n_params_shape), dtype=float)
+
+        for l_shape in range(n_coeffs_shape):
+            l_actual = l_shape + 1
+            l_scale = np.sqrt(l_actual ** l_dependent_power)
+
+            for k in range(1, system.n_energies - 1):
+                row_idx = l_shape * n_interior + (k - 1)
+                idx_km1 = (k - 1) * n_coeffs_shape + l_shape
+                idx_k = k * n_coeffs_shape + l_shape
+                idx_kp1 = (k + 1) * n_coeffs_shape + l_shape
+
+                D_shape[row_idx, idx_km1] = l_scale * 1.0
+                D_shape[row_idx, idx_k] = l_scale * (-2.0)
+                D_shape[row_idx, idx_kp1] = l_scale * 1.0
+
+        D_shape = D_shape.tocsr()
+        R_shape = tikhonov_lambda * (D_shape.T @ D_shape)
+    else:
+        R_shape = csr_matrix((n_params_shape, n_params_shape), dtype=float)
+
+    # Build M_shape (normal equations matrix) - done once
+    sqrt_w = np.sqrt(system.w)
+    Aw_shape = A_shape.multiply(sqrt_w[:, np.newaxis])
+    M_shape = Aw_shape.T @ Aw_shape + R_shape
+
+    # Prepare solver
+    if n_params_shape <= 5000:
+        M_dense = M_shape.toarray() if hasattr(M_shape, 'toarray') else M_shape
+        use_dense = True
+    else:
+        use_dense = False
+
+    all_samples = np.zeros((n_samples, n_params))
+    norm_factors_by_sample = []
+
+    for s_idx in range(n_samples):
+        # Start with copy of original observations
+        y_s = system.y_vec.copy()
+
+        # Apply experiment-level correlated normalization
+        if sigma_norm > 0.0 and system.experiment_groups:
+            norm_factors = {}
+            for exp_id, point_indices in system.experiment_groups.items():
+                if len(point_indices) > 0:
+                    N_exp = rng.lognormal(mean=0.0, sigma=sigma_norm)
+                    norm_factors[exp_id] = N_exp
+                    y_s[point_indices] *= N_exp
+            norm_factors_by_sample.append(norm_factors)
+
+        # Add pointwise statistical noise
+        y_s += rng.normal(0, system.sigma_vec)
+
+        # Subtract c0 contribution
+        y_shape_s = y_s - c0_contrib
+
+        # Solve shape-only system
+        rhs_shape = A_shape.T @ (system.w * y_shape_s)
+
+        if use_dense:
+            try:
+                coeffs_shape = np.linalg.solve(M_dense, rhs_shape)
+            except np.linalg.LinAlgError:
+                coeffs_shape, *_ = np.linalg.lstsq(M_dense, rhs_shape, rcond=None)
+        else:
+            coeffs_shape, *_ = lsqr(M_shape, rhs_shape)[:2]
+
+        # Reconstruct full coefficient vector
+        for energy_idx, c0_val in c0_frozen.items():
+            if energy_idx not in system.energy_idx_to_param_start:
+                continue
+            param_start = system.energy_idx_to_param_start[energy_idx]
+            energy_pos = energy_idx_to_pos[energy_idx]
+            shape_start = energy_pos * n_coeffs_shape
+
+            # c0 (frozen)
+            all_samples[s_idx, param_start] = c0_val
+            # c1..cL (sampled)
+            all_samples[s_idx, param_start + 1:param_start + n_coeffs] = \
+                coeffs_shape[shape_start:shape_start + n_coeffs_shape]
+
+    # Compute diagnostics
+    diagnostics = {
+        'n_samples': n_samples,
+        'sigma_norm': sigma_norm,
+        'n_experiments': len(system.experiment_groups),
+        'n_data_points': n_data,
+        'shape_only': True,
+        'c0_frozen': True,
+    }
+
+    # Compute coefficient statistics
+    coeffs_mean = np.mean(all_samples, axis=0)
+    coeffs_std = np.std(all_samples, axis=0)
+    diagnostics['coeffs_mean_std_ratio'] = np.mean(coeffs_std / (np.abs(coeffs_mean) + 1e-10))
+
+    # Verify c0 is constant across samples
+    c0_stds = []
+    for energy_idx in c0_frozen:
+        if energy_idx in system.energy_idx_to_param_start:
+            param_start = system.energy_idx_to_param_start[energy_idx]
+            c0_std = np.std(all_samples[:, param_start])
+            c0_stds.append(c0_std)
+    diagnostics['c0_max_std'] = max(c0_stds) if c0_stds else 0.0
+
+    if logger:
+        logger.info(f"  MC sampling complete (shape-only)")
+        logger.info(f"  Mean coeff std/mean ratio: {diagnostics['coeffs_mean_std_ratio']:.4f}")
+        logger.info(f"  c0 max std across samples: {diagnostics['c0_max_std']:.2e} (should be ~0)")
+
+    return all_samples, diagnostics
+
+
+def fit_legendre_global_convolution(
+    exfor_cache: Dict[float, List[Tuple[pd.DataFrame, Dict]]],
+    sorted_energies: List[float],
+    energy_bins: List,  # List[EnergyBinInfo] - imported from exfor_utils
+    max_degree: int,
+    n_sigma: float = 3.0,
+    tikhonov_lambda: float = 0.001,
+    min_kernel_weight_fraction: float = 1e-3,
+    min_weight_sum_threshold: float = 0.95,
+    m_proj_u: float = 1.008665,
+    m_targ_u: float = 55.93494,
+    delta_t_ns: float = 10.0,
+    flight_path_m: float = 27.037,
+    l_dependent_power: float = 2.0,
+    skip_c0_regularization: bool = True,
+    shape_only: bool = False,
+    logger=None,
+) -> Tuple[Dict[int, np.ndarray], GlobalFitDiagnostics, Optional[GlobalConvolutionSystem], Optional[Dict[int, float]]]:
+    """
+    Fit Legendre coefficients globally across ALL energies using resolution convolution.
+
+    This method fits all ENDF energy points simultaneously, properly accounting for
+    energy resolution smearing. Each EXFOR measurement contributes to multiple ENDF
+    bins according to its resolution-weighted probability.
+
+    This is a convenience wrapper that calls build_global_convolution_system() and
+    solve_global_convolution() and computes full diagnostics.
+
+    Mathematical Model:
+        For a measurement at nominal energy E_j and angle μ_i:
+
+        y_ij ≈ Σ_k w_jk * (Σ_ℓ c_ℓ(E_k) * P_ℓ(μ_i))
+
+        where:
+        - c_ℓ(E_k) are Legendre coefficients at ENDF grid energy E_k
+        - w_jk = Φ((E_k,high - E_j)/σ_j) - Φ((E_k,low - E_j)/σ_j)
+        - P_ℓ(μ_i) is the Legendre polynomial
+
+    Tikhonov Regularization:
+        Enforces smooth energy dependence via second-difference penalty with
+        ℓ-dependent scaling:
+        R = λ * Σ_ℓ ℓ^p * Σ_k (c_ℓ(E_{k+1}) - 2*c_ℓ(E_k) + c_ℓ(E_{k-1}))²
+
+    Parameters
+    ----------
+    exfor_cache : Dict[float, List[Tuple[pd.DataFrame, Dict]]]
+        Pre-loaded EXFOR data organized by energy
+    sorted_energies : List[float]
+        Sorted list of available EXFOR energies in MeV
+    energy_bins : List[EnergyBinInfo]
+        ENDF energy grid with bin boundaries and resolution info
+    max_degree : int
+        Maximum Legendre polynomial degree (L)
+    n_sigma : float, optional
+        Number of sigmas for energy window (default: 3.0)
+    tikhonov_lambda : float, optional
+        Tikhonov regularization strength (default: 0.001)
+    min_kernel_weight_fraction : float, optional
+        Minimum weight threshold as fraction of max (default: 1e-3)
+    min_weight_sum_threshold : float, optional
+        Warn if weight_sum < this (default: 0.95). Skip if < 0.5.
+    m_proj_u : float, optional
+        Projectile mass in atomic mass units (default: 1.008665)
+    m_targ_u : float, optional
+        Target mass in atomic mass units (default: 55.93494)
+    delta_t_ns : float, optional
+        Default time resolution in nanoseconds (default: 10.0)
+    flight_path_m : float, optional
+        Default flight path in meters (default: 27.037)
+    l_dependent_power : float, optional
+        Power p for ℓ-dependent regularization: λ_ℓ = λ * ℓ^p (default: 2.0)
+    skip_c0_regularization : bool, optional
+        If True, don't apply smoothing penalty to c0 coefficients (default: True)
+    shape_only : bool, optional
+        If True, perform two-pass fit: Pass 1 determines c0 (total cross section),
+        Pass 2 freezes c0 and optimizes only c1..cL (shape parameters). This
+        implements Improvement 3.4 (Shape-Only Global Fit). Default: False.
+    logger : optional
+        Logger for diagnostic messages
+
+    Returns
+    -------
+    Tuple[Dict[int, np.ndarray], GlobalFitDiagnostics, Optional[GlobalConvolutionSystem], Optional[Dict[int, float]]]
+        - Dict mapping energy_index -> array of coefficients [c_0, c_1, ..., c_L]
+        - GlobalFitDiagnostics with fit quality information
+        - GlobalConvolutionSystem (for MC sampling) or None if no data
+        - c0_frozen dict (energy_index -> c0 value) if shape_only=True, else None
+    """
+    # Build the system
+    system, diagnostics = build_global_convolution_system(
+        exfor_cache=exfor_cache,
+        sorted_energies=sorted_energies,
+        energy_bins=energy_bins,
+        max_degree=max_degree,
+        n_sigma=n_sigma,
+        tikhonov_lambda=tikhonov_lambda,
+        min_kernel_weight_fraction=min_kernel_weight_fraction,
+        min_weight_sum_threshold=min_weight_sum_threshold,
+        m_proj_u=m_proj_u,
+        m_targ_u=m_targ_u,
+        delta_t_ns=delta_t_ns,
+        flight_path_m=flight_path_m,
+        l_dependent_power=l_dependent_power,
+        skip_c0_regularization=skip_c0_regularization,
+        logger=logger,
+    )
+
+    # Check if we have data
+    if diagnostics.n_data_points == 0:
+        return {}, diagnostics, None, None
+
+    # Solve for nominal coefficients
+    if logger:
+        logger.info("Solving for nominal coefficients (Pass 1)...")
+
+    coeffs_vec_pass1 = solve_global_convolution(system, logger=logger)
+
+    # Two-pass shape-only fit (Improvement 3.4)
+    c0_frozen = None
+    if shape_only and max_degree > 0:
+        if logger:
+            logger.info("")
+            logger.info("SHAPE-ONLY FIT (Improvement 3.4)")
+            logger.info("  Pass 1: Full fit complete, extracting c0 values...")
+
+        # Extract c0 values from Pass 1
+        c0_frozen = {}
+        for bin_info in energy_bins:
+            if bin_info.index in system.energy_idx_to_param_start:
+                param_start = system.energy_idx_to_param_start[bin_info.index]
+                c0_frozen[bin_info.index] = coeffs_vec_pass1[param_start]
+
+        # Compute Pass 1 chi-squared for comparison
+        y_pred_pass1 = system.A @ coeffs_vec_pass1
+        residuals_pass1 = (system.y_vec - y_pred_pass1) / system.sigma_vec
+        chi2_pass1 = float(np.sum(residuals_pass1 ** 2))
+
+        if logger:
+            logger.info(f"  Pass 1 chi² = {chi2_pass1:.2f}")
+            logger.info("  Pass 2: Shape-only fit (c0 frozen, optimizing c1..cL)...")
+
+        # Pass 2: Shape-only fit
+        coeffs_vec = solve_global_convolution_shape_only(
+            system=system,
+            c0_frozen=c0_frozen,
+            tikhonov_lambda=tikhonov_lambda,
+            l_dependent_power=l_dependent_power,
+            logger=logger,
+        )
+
+        # Compute Pass 2 chi-squared
+        y_pred_pass2 = system.A @ coeffs_vec
+        residuals_pass2 = (system.y_vec - y_pred_pass2) / system.sigma_vec
+        chi2_pass2 = float(np.sum(residuals_pass2 ** 2))
+
+        if logger:
+            logger.info(f"  Pass 2 chi² = {chi2_pass2:.2f}")
+            delta_chi2 = chi2_pass2 - chi2_pass1
+            logger.info(f"  Δchi² (Pass2 - Pass1) = {delta_chi2:+.2f}")
+            if delta_chi2 < -1e-6:
+                logger.warning("  WARNING: Pass 2 chi² < Pass 1 chi² (unexpected)")
+    else:
+        coeffs_vec = coeffs_vec_pass1
+
+    # Compute diagnostics
+    if logger:
+        logger.info("Computing fit diagnostics...")
+
+    # Compute residuals and chi-squared
+    y_pred = system.A @ coeffs_vec
+    residuals = (system.y_vec - y_pred) / system.sigma_vec
+    chi2_total = float(np.sum(residuals ** 2))
+
+    # Per-energy chi-squared and N_eff
+    # Build data_per_energy mapping from data_points
+    data_per_energy = {bin_info.index: [] for bin_info in energy_bins}
+    for i, dp in enumerate(system.data_points):
+        for energy_idx in dp['weights'].keys():
+            data_per_energy[energy_idx].append(i)
+
+    chi2_per_energy = {}
+    n_eff_per_energy = {}
+
+    for bin_info in energy_bins:
+        point_indices = data_per_energy[bin_info.index]
+        if len(point_indices) > 0:
+            # Chi-squared for this energy
+            chi2_energy = float(np.sum(residuals[point_indices] ** 2))
+            chi2_per_energy[bin_info.index] = chi2_energy
+
+            # Effective sample size
+            w_energy = system.w[point_indices]
+            n_eff = (np.sum(w_energy) ** 2) / np.sum(w_energy ** 2) if np.sum(w_energy ** 2) > 0 else 0
+            n_eff_per_energy[bin_info.index] = float(n_eff)
+
+    # Update diagnostics
+    diagnostics.chi2 = chi2_total
+    diagnostics.chi2_per_energy = chi2_per_energy
+    diagnostics.n_eff_per_energy = n_eff_per_energy
+
+    # Reshape coefficients into dict by energy
+    coeffs_by_energy = {}
+    for bin_info in energy_bins:
+        param_start = system.energy_idx_to_param_start[bin_info.index]
+        coeffs = coeffs_vec[param_start:param_start + system.n_coeffs]
+        coeffs_by_energy[bin_info.index] = coeffs
+
+    if logger:
+        logger.info(f"  Total chi² = {chi2_total:.2f}")
+        logger.info(f"  Energies with data: {len(diagnostics.energies_with_data)}/{system.n_energies}")
+        if diagnostics.weight_sum_min < 1.0:
+            logger.info(f"  Min weight sum: {diagnostics.weight_sum_min:.3f}")
+        if diagnostics.n_datasets_skipped > 0:
+            logger.warning(f"  Datasets skipped (severe truncation): {diagnostics.n_datasets_skipped}")
+        if shape_only:
+            logger.info("Global convolution fit complete (shape-only mode).")
+        else:
+            logger.info("Global convolution fit complete.")
+        logger.info("=" * 60)
+
+    return coeffs_by_energy, diagnostics, system, c0_frozen
 
 
 def load_exfor_for_fitting(
