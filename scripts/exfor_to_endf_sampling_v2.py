@@ -86,6 +86,12 @@ from scripts.exfor_utils import (
     _write_sample_wrapper,
 )
 
+# Import multigroup collapse module
+from scripts.multigroup_collapse import (
+    perform_adaptive_multigroup_collapse,
+    MultigroupResult,
+)
+
 # Import TOF parameters module (Improvement 1.4)
 from scripts.tof_parameters import (
     load_tof_parameters_file,
@@ -161,7 +167,23 @@ GENERATE_MC_MEAN_ENDF = True                     # MC mean coefficients ENDF
 GENERATE_SAMPLES_ENDF = False                    # Individual MC sample ENDFs
 GENERATE_COVARIANCE = True                      # Covariance matrix (.npy)
 GENERATE_MF34 = True                            # MF34 covariance section in ENDF
-N_SAMPLES = 10                                   # Number of MC samples
+N_SAMPLES = 25                                   # Number of MC samples
+
+# -----------------------------------------------------------------------------
+# 3b. MULTIGROUP COVARIANCE OPTIONS
+# -----------------------------------------------------------------------------
+GENERATE_MULTIGROUP_COVARIANCE = True           # Enable adaptive multigroup collapse
+MULTIGROUP_RHO_MIN = 0.90                        # Min correlation to merge (0.85-0.95)
+MULTIGROUP_SIGMA_RATIO_MAX = 2.0                 # Max sigma ratio within group (1.5-2.0)
+MULTIGROUP_MIN_WIDTH_FACTOR = 2.0                # Group width >= k * median(sigma_E)
+MF34_COVARIANCE_TYPE = "both"                    # "fine", "multigroup", or "both"
+
+# Variance percentile for multigroup collapse
+# Controls how diagonal variances are scaled after averaging:
+# - 50 = median of fine variances in group (typical)
+# - 80-90 = conservative but not extreme
+# - 100 = maximum fine variance in group (most conservative)
+MULTIGROUP_VARIANCE_PERCENTILE = 90.0
 
 # -----------------------------------------------------------------------------
 # 4. GENERAL PARAMETERS (Apply to ALL methods)
@@ -181,6 +203,8 @@ M_TARG_U = 55.93494                              # Target mass in u (Fe-56)
 MAX_LEGENDRE_DEGREE = 8                          # Maximum Legendre order (capped at 8)
 SELECT_DEGREE = "aicc"                           # "aicc", "bic", or None (use max)
 RIDGE_LAMBDA = 1e-6                              # Ridge regularization parameter
+RIDGE_POWER = 4                                  # Power for ridge penalty (l^ridge_power)
+DF_METHOD = "hat"                                # Degrees of freedom method: "hat" or "naive"
 
 # Processing options
 N_PROCS = 5                                      # Parallel processes (1 = sequential)
@@ -214,7 +238,10 @@ EXPERIMENT_SELECTION_METHOD = "energy_bin"
 # --- Experiment Exclusion and Uncertainty Floor ---
 # Experiments to exclude from fitting (e.g., experiments with known issues)
 # Accepts formats: "20743" (all subentries), "20743002", or "20743/002"
-EXCLUDE_EXPERIMENTS = ["20743002"]  # e.g., ["20743002"] to exclude Cierjacks (1978)
+EXCLUDE_EXPERIMENTS = ["20743002", "32246002"]  
+# - "20743002" - Cierjacks (1978)
+# - "32246002" - Tostkii (1957)
+
 
 # Minimum relative uncertainty floor (prevents unrealistically small errors from dominating)
 # Set to 0.0 to disable. e.g., 0.03 for 3% minimum uncertainty
@@ -243,12 +270,15 @@ N_EFF_WARNING_THRESHOLD = 5.0                    # Warning if N_eff < threshold
 WEIGHT_SPAN_WARNING_RATIO = 3.0                  # Warning if span > ratio * σE
 DEDUPE_NOMINAL = True                            # Dedupe for nominal fits (stability)
 DEDUPE_MC = False                                # Dedupe for MC sampling (False enables energy correlations)
+USE_OVERLAP_WEIGHTS = True                       # Use overlap weights (True) vs Gaussian kernel (False)
 
 # --- 6d. Angular-Band Discrepancy (kernel_weights, energy_bin) ---
 USE_BAND_DISCREPANCY = True                      # Use band-based uncertainty (vs global Birge)
 MIN_POINTS_PER_BAND = 3                          # Minimum points to estimate τ_b per band
 MAX_TAU_FRACTION = 0.25                          # Cap τ_b at 25% of cross section
 TAU_SMOOTHING_WINDOW = 3                         # Moving median window for τ_b(E) smoothing
+RESCALE_UNC_BY_CHI2 = True                       # Apply Birge scaling when band discrepancy disabled
+ALLOW_SHRINK_UNC = False                         # Allow uncertainties to shrink (chi2_red < 1)
 
 # --- 6e. Per-Experiment Normalization (kernel_weights, energy_bin) ---
 NORMALIZATION_SIGMA = 0.05                       # Per-experiment normalization uncertainty (5%)
@@ -580,7 +610,7 @@ def perform_nominal_fits(
     weight_span_warning_ratio: float = 3.0,
     experiment_selection_method: str = "global_convolution",
     min_degree_for_averaging: int = 3,
-    delta_t_ns: float = 10.0,
+    delta_t_ns: float = 5.0,
     flight_path_m: float = 27.037,
     tikhonov_lambda: float = 0.001,
     l_dependent_power: float = 2.0,
@@ -737,7 +767,7 @@ def perform_nominal_fits(
                 target_energy_mev=bin_info.energy_mev,
                 m_proj_u=m_proj_u,
                 m_targ_u=m_targ_u,
-                dedupe_per_experiment=True,
+                dedupe_per_experiment=DEDUPE_NOMINAL,
                 exclude_experiments=exclude_experiments,
                 min_relative_uncertainty=min_relative_uncertainty,
                 # Per-experiment weighting (Improvement 1.1)
@@ -760,8 +790,8 @@ def perform_nominal_fits(
                 max_experiment_weight_fraction=max_experiment_weight_fraction,
                 default_delta_t_ns=delta_t_ns,
                 default_flight_path_m=flight_path_m,
-                use_overlap_weights=True,
-                normalize_by_n_points=True,
+                use_overlap_weights=USE_OVERLAP_WEIGHTS,
+                normalize_by_n_points=NORMALIZE_BY_N_POINTS,
                 dedupe_per_experiment=DEDUPE_NOMINAL,
                 exclude_experiments=exclude_experiments,
                 min_relative_uncertainty=min_relative_uncertainty,
@@ -784,8 +814,8 @@ def perform_nominal_fits(
                     max_experiment_weight_fraction=max_experiment_weight_fraction,
                     default_delta_t_ns=delta_t_ns,
                     default_flight_path_m=flight_path_m,
-                    use_overlap_weights=True,
-                    normalize_by_n_points=True,
+                    use_overlap_weights=USE_OVERLAP_WEIGHTS,
+                    normalize_by_n_points=NORMALIZE_BY_N_POINTS,
                     dedupe_per_experiment=DEDUPE_MC,
                     exclude_experiments=exclude_experiments,
                     min_relative_uncertainty=min_relative_uncertainty,
@@ -828,8 +858,12 @@ def perform_nominal_fits(
             max_degree=max_degree,
             select_degree=select_degree,
             ridge_lambda=ridge_lambda,
+            ridge_power=RIDGE_POWER,
+            df_method=DF_METHOD,
             external_weights=kernel_weights,
             n_samples=1,
+            rescale_unc_by_chi2=RESCALE_UNC_BY_CHI2,
+            allow_shrink_unc=ALLOW_SHRINK_UNC,
             use_band_discrepancy=use_band_discrepancy,
             min_points_per_band=min_points_per_band,
             max_tau_fraction=max_tau_fraction,
@@ -1077,11 +1111,11 @@ def run_exfor_to_endf_sampling_v2(
     ridge_lambda: float = 0.0,
     m_proj_u: float = 1.008665,
     m_targ_u: float = 55.93494,
-    delta_t_ns: float = 10.0,
+    delta_t_ns: float = 5.0,
     flight_path_m: float = 27.037,
     n_sigma_cutoff: float = 3.0,
     use_band_discrepancy: bool = True,
-    min_points_per_band: int = 6,
+    min_points_per_band: int = 3,
     max_tau_fraction: float = 0.25,
     tau_smoothing_window: int = 3,
     sigma_norm: float = 0.05,
@@ -1100,6 +1134,13 @@ def run_exfor_to_endf_sampling_v2(
     generate_samples_endf: bool = True,
     generate_covariance: bool = True,
     generate_mf34: bool = False,
+    # Multigroup covariance options
+    generate_multigroup_covariance: bool = False,
+    multigroup_rho_min: float = 0.90,
+    multigroup_sigma_ratio_max: float = 1.7,
+    multigroup_min_width_factor: float = 2.0,
+    multigroup_variance_percentile: float = 50.0,
+    mf34_covariance_type: str = "fine",
     # Database configuration (new parameters)
     exfor_db_path: str = None,
     exfor_source: str = "auto",
@@ -1592,6 +1633,8 @@ def run_exfor_to_endf_sampling_v2(
                 freeze_c0=FREEZE_C0,
                 sigma_norm=NORMALIZATION_SIGMA,
                 norm_dist=NORM_DIST,
+                normalize_by_n_points=NORMALIZE_BY_N_POINTS,
+                max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
                 logger=_logger,
             )
 
@@ -1639,8 +1682,12 @@ def run_exfor_to_endf_sampling_v2(
                             max_degree=max_degree,
                             select_degree=None,
                             ridge_lambda=ridge_lambda,
+                            ridge_power=RIDGE_POWER,
+                            df_method=DF_METHOD,
                             external_weights=mc_weights if len(mc_weights) > 0 else None,
                             n_samples=n_samples,
+                            rescale_unc_by_chi2=RESCALE_UNC_BY_CHI2,
+                            allow_shrink_unc=ALLOW_SHRINK_UNC,
                             random_state=bin_seed,
                             use_band_discrepancy=use_band_discrepancy,
                             min_points_per_band=min_points_per_band,
@@ -1719,8 +1766,12 @@ def run_exfor_to_endf_sampling_v2(
                                 max_degree=max_degree,
                                 select_degree=None,
                                 ridge_lambda=ridge_lambda,
+                                ridge_power=RIDGE_POWER,
+                                df_method=DF_METHOD,
                                 external_weights=mc_weights if len(mc_weights) > 0 else None,
                                 n_samples=1,
+                                rescale_unc_by_chi2=RESCALE_UNC_BY_CHI2,
+                                allow_shrink_unc=ALLOW_SHRINK_UNC,
                                 random_state=bin_seed + s_idx,
                                 use_band_discrepancy=use_band_discrepancy,
                                 min_points_per_band=min_points_per_band,
@@ -1745,8 +1796,12 @@ def run_exfor_to_endf_sampling_v2(
                             max_degree=max_degree,
                             select_degree=None,  # Don't re-select, use frozen degree
                             ridge_lambda=ridge_lambda,
+                            ridge_power=RIDGE_POWER,
+                            df_method=DF_METHOD,
                             external_weights=mc_weights if len(mc_weights) > 0 else None,
                             n_samples=n_samples,  # Actual MC sampling!
+                            rescale_unc_by_chi2=RESCALE_UNC_BY_CHI2,
+                            allow_shrink_unc=ALLOW_SHRINK_UNC,
                             random_state=bin_seed,  # Deterministic seed for reproducibility
                             use_band_discrepancy=use_band_discrepancy,
                             min_points_per_band=min_points_per_band,
@@ -1838,6 +1893,47 @@ def run_exfor_to_endf_sampling_v2(
         np.save(output_path / "legendre_correlation.npy", corr_matrix)
         _logger.info(f"  Covariance matrix shape: {cov_matrix.shape}")
 
+    # Step 7b: Multigroup covariance (optional)
+    multigroup_result = None
+    if generate_multigroup_covariance and generate_covariance and cov_matrix is not None:
+        _logger.info("")
+        _logger.info("[STEP 7b] Computing adaptive multigroup covariance")
+        _logger.info(f"  Using l=1 correlation for grouping (same grid for all orders)")
+
+        try:
+            multigroup_result = perform_adaptive_multigroup_collapse(
+                cov_matrix=cov_matrix,
+                corr_matrix=corr_matrix,
+                nominal_results=nominal_results,
+                energy_bins=energy_bins,
+                max_order=max_degree,
+                rho_min=multigroup_rho_min,
+                sigma_ratio_max=multigroup_sigma_ratio_max,
+                min_width_factor=multigroup_min_width_factor,
+                variance_percentile=multigroup_variance_percentile,
+                logger=_logger,
+            )
+
+            # Log and save results
+            n_fine = len([nr for nr in nominal_results if not nr.interpolated and nr.has_data])
+            n_groups = len(multigroup_result.groups)
+            _logger.info(f"  Fine bins: {n_fine} -> Multigroups: {n_groups}")
+            _logger.info(f"  Compression: {n_fine/n_groups:.1f}x")
+
+            np.save(output_path / "legendre_covariance_multigroup.npy",
+                    multigroup_result.cov_grouped)
+            np.save(output_path / "legendre_correlation_multigroup.npy",
+                    multigroup_result.corr_grouped)
+            np.save(output_path / "multigroup_boundaries_ev.npy",
+                    multigroup_result.group_boundaries_ev)
+            np.save(output_path / "multigroup_mean_coeffs.npy",
+                    multigroup_result.mean_grouped)
+            _logger.info(f"  Saved multigroup covariance and boundaries")
+
+        except Exception as e:
+            _logger.error(f"Failed to compute multigroup covariance: {str(e)}", console=True)
+            multigroup_result = None
+
     # Step 8: Write ENDF files
     evaluation_file = None
     if generate_mc_mean_endf:
@@ -1890,6 +1986,7 @@ def run_exfor_to_endf_sampling_v2(
     if generate_mf34 and generate_covariance and cov_matrix is not None:
         _logger.info("")
         _logger.info("[STEP 10] Writing MF34 using kika.endf.writers")
+        _logger.info(f"  Covariance type: {mf34_covariance_type}")
 
         try:
             endf_orig = read_endf(endf_file)
@@ -1909,35 +2006,70 @@ def run_exfor_to_endf_sampling_v2(
             mt_data = mf4.sections.get(mt_number)
             all_energies_ev = np.array(mt_data.legendre_energies)
 
-            processed_energies_ev = np.array([all_energies_ev[i] for i in energy_indices])
-            if energy_indices[-1] + 1 < len(all_energies_ev):
-                energy_grid_ev = np.append(processed_energies_ev, all_energies_ev[energy_indices[-1] + 1])
-            else:
-                if len(processed_energies_ev) > 1:
-                    delta = processed_energies_ev[-1] - processed_energies_ev[-2]
-                    energy_grid_ev = np.append(processed_energies_ev, processed_energies_ev[-1] + delta)
+            # Write fine-grid MF34 if requested
+            if mf34_covariance_type in ("fine", "both"):
+                processed_energies_ev = np.array([all_energies_ev[i] for i in energy_indices])
+                if energy_indices[-1] + 1 < len(all_energies_ev):
+                    energy_grid_ev = np.append(processed_energies_ev, all_energies_ev[energy_indices[-1] + 1])
                 else:
-                    energy_grid_ev = np.append(processed_energies_ev, processed_energies_ev[-1] * 1.1)
+                    if len(processed_energies_ev) > 1:
+                        delta = processed_energies_ev[-1] - processed_energies_ev[-2]
+                        energy_grid_ev = np.append(processed_energies_ev, processed_energies_ev[-1] + delta)
+                    else:
+                        energy_grid_ev = np.append(processed_energies_ev, processed_energies_ev[-1] * 1.1)
 
-            # Use LIBRARY function (new location)
-            mf34 = create_mf34_from_covariance(
-                cov_matrix=cov_matrix,
-                energy_grid_ev=energy_grid_ev,
-                max_order=max_degree,
-                za=za,
-                awr=awr,
-                mat=mat,
-                mt=mt_number,
-            )
+                mf34_fine = create_mf34_from_covariance(
+                    cov_matrix=cov_matrix,
+                    energy_grid_ev=energy_grid_ev,
+                    max_order=max_degree,
+                    za=za,
+                    awr=awr,
+                    mat=mat,
+                    mt=mt_number,
+                )
 
-            # Use LIBRARY function (new location)
-            if evaluation_file:
-                write_mf34_to_file(evaluation_file, mf34, evaluation_file)
-                _logger.info(f"  MF34 added to evaluation: {evaluation_file}")
+                if evaluation_file:
+                    write_mf34_to_file(evaluation_file, mf34_fine, evaluation_file)
+                    _logger.info(f"  Fine MF34 added to evaluation: {evaluation_file}")
 
-            if nominal_file:
-                write_mf34_to_file(nominal_file, mf34, nominal_file)
-                _logger.info(f"  MF34 added to nominal: {nominal_file}")
+                if nominal_file:
+                    write_mf34_to_file(nominal_file, mf34_fine, nominal_file)
+                    _logger.info(f"  Fine MF34 added to nominal: {nominal_file}")
+
+            # Write multigroup MF34 if requested and available
+            if mf34_covariance_type in ("multigroup", "both") and multigroup_result is not None:
+                mf34_mg = create_mf34_from_covariance(
+                    cov_matrix=multigroup_result.cov_grouped,
+                    energy_grid_ev=multigroup_result.group_boundaries_ev,
+                    max_order=max_degree,
+                    za=za,
+                    awr=awr,
+                    mat=mat,
+                    mt=mt_number,
+                )
+
+                # For multigroup, write to separate files with _mg suffix
+                if evaluation_file:
+                    mg_eval_file = evaluation_file.replace('.txt', '_mg.endf').replace('.endf', '_mg.endf')
+                    if mg_eval_file == evaluation_file:
+                        mg_eval_file = evaluation_file + '_mg'
+                    # Copy evaluation file and add multigroup MF34
+                    import shutil
+                    shutil.copy(evaluation_file, mg_eval_file)
+                    write_mf34_to_file(mg_eval_file, mf34_mg, mg_eval_file)
+                    _logger.info(f"  Multigroup MF34 written to: {mg_eval_file}")
+
+                if nominal_file:
+                    mg_nom_file = nominal_file.replace('.txt', '_mg.endf').replace('.endf', '_mg.endf')
+                    if mg_nom_file == nominal_file:
+                        mg_nom_file = nominal_file + '_mg'
+                    import shutil
+                    shutil.copy(nominal_file, mg_nom_file)
+                    write_mf34_to_file(mg_nom_file, mf34_mg, mg_nom_file)
+                    _logger.info(f"  Multigroup MF34 written to: {mg_nom_file}")
+
+            elif mf34_covariance_type in ("multigroup", "both") and multigroup_result is None:
+                _logger.warning("  Multigroup covariance requested but not computed (enable GENERATE_MULTIGROUP_COVARIANCE)")
 
         except Exception as e:
             _logger.error(f"Failed to write MF34: {str(e)}", console=True)
@@ -1997,6 +2129,13 @@ if __name__ == "__main__":
         generate_samples_endf=GENERATE_SAMPLES_ENDF,
         generate_covariance=GENERATE_COVARIANCE,
         generate_mf34=GENERATE_MF34,
+        # Multigroup covariance options
+        generate_multigroup_covariance=GENERATE_MULTIGROUP_COVARIANCE,
+        multigroup_rho_min=MULTIGROUP_RHO_MIN,
+        multigroup_sigma_ratio_max=MULTIGROUP_SIGMA_RATIO_MAX,
+        multigroup_min_width_factor=MULTIGROUP_MIN_WIDTH_FACTOR,
+        multigroup_variance_percentile=MULTIGROUP_VARIANCE_PERCENTILE,
+        mf34_covariance_type=MF34_COVARIANCE_TYPE,
         # Database configuration
         exfor_db_path=EXFOR_DB_PATH,
         exfor_source=EXFOR_SOURCE,

@@ -356,6 +356,8 @@ This introduces cross-bin correlations in the MC samples that reflect energy res
 | `MAX_LEGENDRE_DEGREE` | int | 8 | Maximum Legendre polynomial order |
 | `SELECT_DEGREE` | str/None | `"aicc"` | Degree selection: `"aicc"`, `"bic"`, or `None` (use max) |
 | `RIDGE_LAMBDA` | float | 1e-6 | Ridge regularization for Legendre fitting |
+| `RIDGE_POWER` | int | 4 | Power exponent for L-dependent ridge penalty. Higher values suppress high-order Legendre coefficients more strongly. Used in formula: λ × (ℓ+1)^RIDGE_POWER |
+| `DF_METHOD` | str | `"hat"` | Method for computing effective degrees of freedom in AICc/BIC. `"hat"` uses trace of hat matrix (more accurate for regularized fits), `"naive"` uses number of parameters |
 | `N_PROCS` | int | 5 | Number of parallel processes (1 = sequential) |
 | `BASE_SEED` | int | 42 | Random seed for reproducibility |
 
@@ -431,6 +433,7 @@ where $v = c\sqrt{2E/m_n}$ is the neutron velocity.
 | `WEIGHT_SPAN_WARNING_RATIO` | float | 3.0 | Warn if span > ratio × $\sigma E$ |
 | `DEDUPE_NOMINAL` | bool | True | Deduplicate for nominal fits |
 | `DEDUPE_MC` | bool | False | Deduplicate for MC sampling |
+| `USE_OVERLAP_WEIGHTS` | bool | True | When True, uses overlap integral weights (probability that true energy lies in each bin). When False, uses simple Gaussian kernel weights. Overlap weights are more accurate for resolution-aware fitting |
 
 **N_eff (Effective Sample Size):**
 
@@ -448,6 +451,8 @@ A low $N_{\text{eff}}$ indicates that a few experiments dominate the fit.
 | `MIN_POINTS_PER_BAND` | int | 3 | Minimum points to estimate $\tau$ per band |
 | `MAX_TAU_FRACTION` | float | 0.25 | Cap $\tau_b$ at this fraction of cross section |
 | `TAU_SMOOTHING_WINDOW` | int | 3 | Moving median window for $\tau(E)$ smoothing |
+| `RESCALE_UNC_BY_CHI2` | bool | True | When band discrepancy is disabled, apply Birge scaling (multiply uncertainties by √χ²_red) to account for model-data discrepancy. Ignored when `USE_BAND_DISCREPANCY=True` |
+| `ALLOW_SHRINK_UNC` | bool | False | When Birge scaling is applied and χ²_red < 1, allow uncertainties to shrink. When False (default), scaling factor is capped at 1.0 to prevent underestimation of errors |
 
 **Angular Bands:**
 - Forward: $\mu > 0.5$ ($\theta < 60°$)
@@ -501,6 +506,8 @@ This matrix shows which parameters apply to which experiment selection methods.
 | Parameter | global_convolution | kernel_weights | energy_bin |
 |-----------|:------------------:|:--------------:|:----------:|
 | **Section 4.1-4.4 (General)** | ✓ | ✓ | ✓ |
+| `RIDGE_POWER` | - | ✓ | ✓ |
+| `DF_METHOD` | - | ✓ | ✓ |
 | **Section 4.6 (Filtering)** | ✓ | ✓ | ✓ |
 | `DELTA_T_NS` | ✓ | ✓ | - |
 | `FLIGHT_PATH_M` | ✓ | ✓ | - |
@@ -516,10 +523,13 @@ This matrix shows which parameters apply to which experiment selection methods.
 | `WEIGHT_SPAN_WARNING_RATIO` | - | ✓ | - |
 | `DEDUPE_NOMINAL` | - | ✓ | - |
 | `DEDUPE_MC` | - | ✓ | - |
+| `USE_OVERLAP_WEIGHTS` | ✓ | ✓ | - |
 | `USE_BAND_DISCREPANCY` | - | ✓ | ✓ |
 | `MIN_POINTS_PER_BAND` | - | ✓ | ✓ |
 | `MAX_TAU_FRACTION` | - | ✓ | ✓ |
 | `TAU_SMOOTHING_WINDOW` | - | ✓ | ✓ |
+| `RESCALE_UNC_BY_CHI2` | - | ✓ | ✓ |
+| `ALLOW_SHRINK_UNC` | - | ✓ | ✓ |
 | `NORMALIZATION_SIGMA` | - | ✓ | ✓ |
 | `NORM_DIST` | - | ✓ | ✓ |
 | `USE_MODEL_AVERAGING` | - | ✓ | ✓ |

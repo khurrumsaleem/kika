@@ -192,7 +192,7 @@ def compute_angular_band_discrepancy(
     y: np.ndarray,
     sigma: np.ndarray,
     y_fit: np.ndarray,
-    min_points_per_band: int = 6,
+    min_points_per_band: int = 3,
     max_tau_fraction: float = 0.25,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
     """
@@ -462,7 +462,7 @@ def compute_weight_span_95(
 
 def compute_energy_resolution_tof(
     E_mev: float,
-    delta_t_ns: float = 10.0,
+    delta_t_ns: float = 5.0,
     flight_path_m: float = 27.037,
 ) -> float:
     """
@@ -818,12 +818,13 @@ def sample_legendre_coefficients(
     external_weights: Optional[np.ndarray] = None,
     # sampling
     n_samples: int = 1,
+    stochastic: bool = False,
     rescale_unc_by_chi2: bool = True,
     allow_shrink_unc: bool = False,
     random_state: Optional[int] = None,
     # angular-band discrepancy model
     use_band_discrepancy: bool = False,
-    min_points_per_band: int = 6,
+    min_points_per_band: int = 3,
     max_tau_fraction: float = 0.25,
     # fixed-c0 mode (Improvement 1.2)
     freeze_c0: bool = False,
@@ -860,6 +861,10 @@ def sample_legendre_coefficients(
         Gaussian kernel weights g_ij. Combined with uncertainties as w_ij = g_ij / σ²
     n_samples : int
         Number of MC samples to generate
+    stochastic : bool
+        If True, force stochastic sampling (normalization + pointwise noise) even when
+        n_samples=1. This is useful for energy-jitter MC where each iteration needs
+        a single stochastic sample rather than the nominal fit.
     rescale_unc_by_chi2 : bool
         Apply global Birge scaling (only if use_band_discrepancy=False)
     use_band_discrepancy : bool
@@ -1035,10 +1040,11 @@ def sample_legendre_coefficients(
 
     # Sampling fits
     samples = []
-    if n_samples <= 1:
+    if n_samples <= 1 and not stochastic:
         samples.append(coeffs0)
     else:
-        for _ in range(int(n_samples)):
+        n_draws = max(1, int(n_samples))
+        for _ in range(n_draws):
             y_s = y.copy()
 
             # Apply correlated normalization uncertainty per experiment (Improvement 1.3)
@@ -1080,7 +1086,7 @@ def sample_legendre_coefficients(
         chi2_red=chi2_red,
         scale_factor=scale,
         eff_params=k_0,
-        sampled=n_samples > 1,
+        sampled=n_samples > 1 or stochastic,
         tau_info=tau_info,
         use_band_discrepancy=use_band_discrepancy,
         # Model averaging info
@@ -1210,7 +1216,7 @@ def build_global_convolution_system(
     min_weight_sum_threshold: float = 0.95,
     m_proj_u: float = 1.008665,
     m_targ_u: float = 55.93494,
-    delta_t_ns: float = 10.0,
+    delta_t_ns: float = 5.0,
     flight_path_m: float = 27.037,
     l_dependent_power: float = 2.0,
     skip_c0_regularization: bool = True,
@@ -2117,7 +2123,7 @@ def fit_legendre_global_convolution(
     min_weight_sum_threshold: float = 0.95,
     m_proj_u: float = 1.008665,
     m_targ_u: float = 55.93494,
-    delta_t_ns: float = 10.0,
+    delta_t_ns: float = 5.0,
     flight_path_m: float = 27.037,
     l_dependent_power: float = 2.0,
     skip_c0_regularization: bool = True,

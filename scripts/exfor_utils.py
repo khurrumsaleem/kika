@@ -385,7 +385,7 @@ def compute_energy_bins_with_tof_resolution(
     energies_ev: np.ndarray,
     energy_min_mev: float,
     energy_max_mev: float,
-    delta_t_ns: float = 10.0,
+    delta_t_ns: float = 5.0,
     flight_path_m: float = 27.037,
 ) -> List[EnergyBinInfo]:
     """
@@ -693,7 +693,7 @@ def filter_exfor_with_kernel_weights(
     bin_upper_mev: float = float('inf'),
     min_kernel_weight_fraction: float = 1e-3,
     max_experiment_weight_fraction: float = 0.5,
-    default_delta_t_ns: float = 10.0,
+    default_delta_t_ns: float = 5.0,
     default_flight_path_m: float = 27.037,
     use_overlap_weights: bool = True,
     normalize_by_n_points: bool = True,
@@ -1648,6 +1648,8 @@ def run_mc_with_energy_jitter(
     freeze_c0: bool = False,
     sigma_norm: float = 0.0,
     norm_dist: str = "lognormal",
+    normalize_by_n_points: bool = False,
+    max_experiment_weight_fraction: float = 1.0,
     logger=None,
 ) -> Tuple[Dict[int, Dict[int, np.ndarray]], BinJumpDiagnostics]:
     """
@@ -1710,6 +1712,12 @@ def run_mc_with_energy_jitter(
         Per-experiment normalization uncertainty
     norm_dist : str
         Normalization distribution ("lognormal" or "normal")
+    normalize_by_n_points : bool
+        If True, weight each point by 1/n_points for its experiment (equal weight per
+        experiment regardless of point count). Matches nominal fit weighting.
+    max_experiment_weight_fraction : float
+        Cap total weight fraction any single experiment can have (e.g., 0.5 = max 50%).
+        Set to 1.0 to disable capping. Matches nominal fit weighting.
     logger : optional
         Logger instance
 
@@ -1789,6 +1797,17 @@ def run_mc_with_energy_jitter(
 
             bin_assignments[target_bin].append((dataset, E_star))
 
+        # Step 1b: Compute per-bin experiment point counts for weighting
+        bin_exp_n_points: Dict[int, Dict[Tuple[str, str], int]] = {
+            bin_info.index: {} for bin_info in energy_bins
+        }
+        if normalize_by_n_points:
+            for bin_idx, assigned in bin_assignments.items():
+                for dataset, E_star in assigned:
+                    exp_key = (dataset.entry, dataset.subentry)
+                    current = bin_exp_n_points[bin_idx].get(exp_key, 0)
+                    bin_exp_n_points[bin_idx][exp_key] = current + dataset.n_points
+
         # Step 2: Fit each bin using jitter-assigned datasets
         sample_coeffs: Dict[int, np.ndarray] = {}
 
@@ -1834,6 +1853,14 @@ def run_mc_with_energy_jitter(
                     dsig_cm = dsig
                     error_cm = error_stat
 
+                # Compute kernel weight (Improvement 1.1: per-experiment weighting)
+                exp_key = (dataset.entry, dataset.subentry)
+                if normalize_by_n_points and exp_key in bin_exp_n_points[bin_info.index]:
+                    total_pts = bin_exp_n_points[bin_info.index][exp_key]
+                    kw = 1.0 / total_pts if total_pts > 0 else 1.0
+                else:
+                    kw = 1.0
+
                 transformed_df = pd.DataFrame({
                     'theta_deg': angles_cm_deg,
                     'value': dsig_cm,
@@ -1842,7 +1869,7 @@ def run_mc_with_energy_jitter(
                     'entry': dataset.entry,
                     'subentry': dataset.subentry,
                     'exfor_energy_mev': E_star,
-                    'kernel_weight': 1.0,  # Uniform weights for energy_bin method
+                    'kernel_weight': kw,
                 })
                 frames.append(transformed_df)
 
@@ -1857,6 +1884,14 @@ def run_mc_with_energy_jitter(
                 continue
 
             combined_df = pd.concat(frames, ignore_index=True)
+
+            # Apply per-experiment weight capping if requested (Improvement 1.1)
+            if max_experiment_weight_fraction < 1.0 and len(combined_df) > 0:
+                kernel_weights_arr = combined_df['kernel_weight'].to_numpy()
+                kernel_weights_arr, _, _ = apply_per_experiment_weight_cap(
+                    combined_df, kernel_weights_arr, max_experiment_weight_fraction
+                )
+                combined_df['kernel_weight'] = kernel_weights_arr
 
             # Apply uncertainty floor if requested
             if min_relative_uncertainty > 0:
@@ -1893,6 +1928,7 @@ def run_mc_with_energy_jitter(
                     ridge_lambda=ridge_lambda,
                     external_weights=combined_df['kernel_weight'].to_numpy(),
                     n_samples=1,  # Just one sample per MC iteration
+                    stochastic=True,  # Force stochastic sampling for measurement uncertainty
                     random_state=base_seed + s_idx * 1000 + bin_info.index,
                     use_band_discrepancy=use_band_discrepancy,
                     min_points_per_band=min_points_per_band,
