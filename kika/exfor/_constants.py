@@ -103,18 +103,31 @@ EXFOR_QUANTITY_CODES = {
     "CS": "Cross section data",
     "CSP": "Partial cross section data",
     "CST": "Temperature dependent cross section data",
+    "ALF": "Alpha (capture-to-fission ratio)",
+    "ETA": "Eta (neutrons per non-elastic event)",
 
     # Differential data
     "DA": "Differential data with respect to angle",
     "DAE": "Differential data with respect to angle and energy",
     "DAP": "Partial differential data with respect to angle",
+    "DAA": "Double differential angular distribution",
+    "D3A": "Triple differential angular distribution",
+    "D3E": "Triple differential energy distribution",
+    "D4A": "Quadruple differential angular distribution",
     "DE": "Differential data with respect to energy",
     "DEP": "Partial differential data with respect to energy",
+    "DT": "Time differential data",
 
     # Fission data
     "FY": "Fission product yields",
     "E": "Fission fragment energies",
     "MFQ": "Miscellaneous fission quantities",
+
+    # Neutron data
+    "NU": "Neutron multiplicity (nubar)",
+    "NUD": "Delayed neutron data",
+    "NUF": "Fission neutron data",
+    "MLT": "Multiplicity",
 
     # Product yields
     "PY": "Product yields",
@@ -123,14 +136,25 @@ EXFOR_QUANTITY_CODES = {
     "TTP": "Partial thick target yields",
 
     # Other quantities
+    "AMP": "Scattering amplitude",
+    "CHG": "Charge distribution",
     "COR": "Secondary particle correlations",
+    "DP": "Momentum distribution",
+    "INT": "Integral quantities",
+    "KE": "Kinetic energy",
+    "KER": "KERMA factors",
     "L": "Scattering amplitudes",
+    "MAS": "Mass distribution",
     "NQ": "Nuclear quantities",
+    "POD": "Polarization differential data",
     "POL": "Polarization data",
+    "POT": "Potential scattering",
     "RI": "Resonance integrals",
     "RP": "Resonance parameters",
     "RR": "Reaction rates",
     "SP": "Gamma spectra",
+    "SPC": "Gamma spectra (detailed)",
+    "TSL": "Thermal scattering law",
 }
 
 # Wildcard/combined quantity codes (match multiple types)
@@ -145,14 +169,18 @@ EXFOR_URL_BASE = "https://www-nds.iaea.org/exfor/"
 
 # Quantity families for grouping related types
 QUANTITY_FAMILIES = {
-    "cross_section": ["CS", "CSP", "CST"],
-    "angular": ["DA", "DAE", "DAP"],
-    "energy_spectrum": ["DE", "DEP"],
+    "cross_section": ["CS", "CSP", "CST", "ALF", "ETA"],
+    "angular": ["DA", "DAE", "DAP", "DAA", "D3A", "D4A"],
+    "energy_spectrum": ["DE", "DEP", "D3E", "DT"],
     "fission": ["FY", "E", "MFQ"],
+    "neutron_data": ["NU", "NUD", "NUF", "MLT"],
     "product_yields": ["PY", "TT", "TTD", "TTP"],
     "resonance": ["RI", "RP"],
-    "polarization": ["POL"],
-    "other": ["COR", "L", "NQ", "RR", "SP"],
+    "polarization": ["POL", "POD"],
+    "other": [
+        "AMP", "CHG", "COR", "DP", "INT", "KE", "KER",
+        "L", "MAS", "NQ", "POT", "RR", "SP", "SPC", "TSL",
+    ],
 }
 
 # Family code to variable name mapping (for general data parsing)

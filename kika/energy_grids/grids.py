@@ -1,7 +1,15 @@
 """
 Energy grid definitions for various standard binning schemes.
+
+All energies are in MeV. Each array contains N+1 boundaries defining N groups.
 """
 
+# Source: ORNL/TM-9801, "VITAMIN-E: An ENDF/B-V Multigroup Cross-Section Library
+# for LMFBR Core and Shield, LWR Shield, Dosimetry and Fusion Blanket Technology"
+# (R.W. Roussin et al., 1986). Also available as ENDF-274 (NNDC/BNL).
+# RSICC package: DLC-113
+# NOTE: This is actually VITAMIN-E (174 groups), the ORNL predecessor to VITAMIN-J.
+# It differs from VITAMIN-J by lacking the boundary at 12.84 MeV.
 VITAMINJ174 = [
     1.0000e-11, 1.0000e-07, 4.1399e-07, 5.3158e-07, 6.8256e-07, 8.7642e-07,
     1.1254e-06, 1.4450e-06, 1.8554e-06, 2.3824e-06, 3.0590e-06, 3.9279e-06,
@@ -35,6 +43,12 @@ VITAMINJ174 = [
     1.9640e+01
 ]
 
+# Source: E. Sartori, "Standard Energy Group Structures of Cross Section Libraries for
+# Reactor Shielding, Reactor Cell and Fusion Neutronics Applications: VITAMIN-J, ECCO-33,
+# ECCO-2000 and XMAS", JEF/DOC-315 Rev. 3, OECD/NEA Data Bank (1990).
+# OECD/NEA package: NEA-1344 (ZZ GROUPSTRUCTURES). RSICC package: DLC-274.
+# Also available in NJOY2016 GROUPR module (ign=17).
+# https://serpent.vtt.fi/mediawiki/index.php/Vitamin-j_175-group_structure
 VITAMINJ175 = [
     1.0000e-11, 1.0000e-07, 4.1399e-07, 5.3158e-07, 6.8256e-07, 8.7642e-07, 
     1.1254e-06, 1.4450e-06, 1.8554e-06, 2.3824e-06, 3.0590e-06, 3.9279e-06, 
@@ -68,6 +82,11 @@ VITAMINJ175 = [
     1.7333e+01, 1.9640e+01
 ]
 
+# Source: SCALE Code System, ORNL/TM-2005/39 (Section 10.3, Covariance Libraries).
+# 44-group covariance structure, subset of the SCALE 238-group structure.
+# Distributed with SCALE 6.0/6.1 as library "44groupcov". Superseded by 56-group in SCALE 6.2+.
+# https://scale-manual.ornl.gov/COVLIB.html
+# https://serpent.vtt.fi/mediawiki/index.php/SCALE_44-group_structure
 SCALE44 = [
     1.0000e-11, 3.0000e-09, 7.5000e-09, 1.0000e-08, 2.5300e-08, 3.0000e-08,
     4.0000e-08, 5.0000e-08, 7.0000e-08, 1.0000e-07, 1.5000e-07, 2.0000e-07,
@@ -79,6 +98,11 @@ SCALE44 = [
     6.4340e+00, 8.1873e+00, 2.0000e+01
 ]
 
+# Source: SCALE Code System, ORNL/TM-2005/39, Version 6.2+ (Section 10.3, Covariance Libraries).
+# 56-group covariance structure, subset of the SCALE 252-group structure.
+# Default covariance library for TSUNAMI/Sampler in SCALE 6.2+.
+# https://scale-manual.ornl.gov/COVLIB.html
+# https://serpent.vtt.fi/mediawiki/index.php/SCALE_56-group_structure
 SCALE56 = [
     1.0000e-11, 4.0000E-09, 1.0000E-08, 2.5300E-08, 4.0000E-08, 5.0000E-08, 
     6.0000E-08, 8.0000E-08, 1.0000E-07, 1.5000E-07, 2.0000E-07, 2.5000E-07, 
@@ -92,6 +116,11 @@ SCALE56 = [
     4.3040E+00, 6.4340E+00, 2.0000E+01
 ]
 
+# Source: SCALE Code System, ORNL/TM-2005/39 (Section 10.1, Cross Section Libraries).
+# 238-group fine-group transport structure. Standard in SCALE 6.0/6.1, based on ENDF/B-VII.0.
+# Superseded by the 252-group structure in SCALE 6.2+.
+# https://scale-manual.ornl.gov/XSLib.html
+# https://serpent.vtt.fi/mediawiki/index.php/SCALE_238-group_structure
 SCALE238 = [
     1.0000E-11, 1.0000E-10, 5.0000E-10, 7.5000E-10, 1.0000E-09, 1.2000E-09, 
     1.5000E-09, 2.0000E-09, 2.5000E-09, 3.0000E-09, 4.0000E-09, 5.0000E-09, 
@@ -135,6 +164,11 @@ SCALE238 = [
     1.3840E+01, 1.4550E+01, 1.5680E+01, 1.7330E+01, 2.0000E+01
 ]
 
+# Source: SCALE Code System, ORNL/TM-2005/39, Version 6.2+ (Section 10.1, Cross Section Libraries).
+# 252-group fine-group transport structure. Standard in SCALE 6.2+, based on ENDF/B-VII.1.
+# Adds 14 groups over the 238-group structure (better U-238 resonance resolution, 5 eV thermal cutoff).
+# https://scale-manual.ornl.gov/XSLib.html
+# https://serpent.vtt.fi/mediawiki/index.php/SCALE_252-group_structure
 SCALE252 = [
     1.0000E-11, 1.0000E-10, 5.0000E-10, 7.5000E-10, 1.0000E-09, 1.2000E-09, 
     1.5000E-09, 2.0000E-09, 2.5000E-09, 3.0000E-09, 4.0000E-09, 5.0000E-09, 
@@ -181,6 +215,10 @@ SCALE252 = [
     2.0000E+01
 ]
 
+# Source: IAEA WIMS Library Update Project (WLUP).
+# C.J. Taubman, "The WIMS 69-group library tape 166259", AEEW-M1324, UKAEA Winfrith (1975).
+# https://www-nds.iaea.org/wimsd/energy.htm
+# https://serpent.vtt.fi/mediawiki/index.php/WIMS_69-group_structure
 WIMS69 = [
     1.0000e-11, 5.0000e-09, 1.0000e-08, 1.5000e-08, 2.0000e-08, 2.5000e-08,
     3.0000e-08, 3.5000e-08, 4.2000e-08, 5.0000e-08, 5.8000e-08, 6.7000e-08,
@@ -197,6 +235,9 @@ WIMS69 = [
 ]
 
 
+# Source: Serpent Monte Carlo wiki (VTT Technical Research Centre of Finland).
+# Condensed subset of the CASMO-70 structure. Not an official Studsvik CASMO structure.
+# https://serpent.vtt.fi/mediawiki/index.php/CASMO_12-group_structure
 CASMO12 = [
     1.0000E-11, 3.0000E-08, 5.8000E-08, 1.4000E-07, 2.8000E-07, 3.5000E-07,
     6.2500E-07, 4.0000E-06, 4.8052E-05, 5.5300E-03, 8.2100E-01, 2.2310E+00, 
@@ -204,6 +245,12 @@ CASMO12 = [
 ]
 
 
+# Source: E. Sartori, "Standard Energy Group Structures of Cross Section Libraries for
+# Reactor Shielding, Reactor Cell and Fusion Neutronics Applications: VITAMIN-J, ECCO-33,
+# ECCO-2000 and XMAS", JEF/DOC-315 Rev. 3, OECD/NEA Data Bank (1990).
+# OECD/NEA package: NEA-1344 (ZZ GROUPSTRUCTURES). RSICC package: DLC-274.
+# Used in the ERANOS/ECCO fast reactor code system (CEA).
+# https://serpent.vtt.fi/mediawiki/index.php/ECCO_33-group_structure
 ECCO33 = [
     1.00001e-11, 1.00000e-07, 5.40000e-07, 4.00000e-06, 8.31529e-06, 1.37096e-05,
     2.26033e-05, 4.01690e-05, 6.79040e-05, 9.16609e-05, 1.48625e-04, 3.04325e-04,
@@ -213,6 +260,82 @@ ECCO33 = [
     3.67879e+00, 6.06531e+00, 1.00000e+01, 1.96403e+01,
     ]
 
+# Single energy group spanning the full range (1e-11 to 20 MeV). Useful for total integrals.
 ONEGROUP20 = [
     1.000e-11, 2.0000e+01,
+]
+
+
+# Source: OpenMC GROUP_STRUCTURES (MIT license)
+# https://github.com/openmc-dev/openmc/blob/develop/openmc/mgxs/__init__.py
+CASMO40 = [
+    1.0000e-11, 1.5000e-08, 3.0000e-08, 4.2000e-08, 5.8000e-08, 8.0000e-08,
+    1.0000e-07, 1.4000e-07, 1.8000e-07, 2.2000e-07, 2.8000e-07, 3.5000e-07,
+    6.2500e-07, 8.5000e-07, 9.5000e-07, 9.7200e-07, 1.0200e-06, 1.0970e-06,
+    1.1500e-06, 1.3000e-06, 1.5000e-06, 1.8550e-06, 2.1000e-06, 2.6000e-06,
+    3.3000e-06, 4.0000e-06, 9.8770e-06, 1.5968e-05, 2.7700e-05, 4.8052e-05,
+    1.4873e-04, 5.5300e-03, 9.1180e-03, 1.1100e-01, 5.0000e-01, 8.2100e-01,
+    1.3530e+00, 2.2310e+00, 3.6790e+00, 6.0655e+00, 2.0000e+01,
+]
+
+# Source: OpenMC GROUP_STRUCTURES (MIT license)
+# https://github.com/openmc-dev/openmc/blob/develop/openmc/mgxs/__init__.py
+CASMO70 = [
+    1.0000e-11, 5.0000e-09, 1.0000e-08, 1.5000e-08, 2.0000e-08, 2.5000e-08,
+    3.0000e-08, 3.5000e-08, 4.2000e-08, 5.0000e-08, 5.8000e-08, 6.7000e-08,
+    8.0000e-08, 1.0000e-07, 1.4000e-07, 1.8000e-07, 2.2000e-07, 2.5000e-07,
+    2.8000e-07, 3.0000e-07, 3.2000e-07, 3.5000e-07, 4.0000e-07, 5.0000e-07,
+    6.2500e-07, 7.8000e-07, 8.5000e-07, 9.1000e-07, 9.5000e-07, 9.7200e-07,
+    9.9600e-07, 1.0200e-06, 1.0450e-06, 1.0710e-06, 1.0970e-06, 1.1230e-06,
+    1.1500e-06, 1.3000e-06, 1.5000e-06, 1.8550e-06, 2.1000e-06, 2.6000e-06,
+    3.3000e-06, 4.0000e-06, 9.8770e-06, 1.5968e-05, 2.7700e-05, 4.8052e-05,
+    7.5501e-05, 1.4873e-04, 3.6726e-04, 9.0690e-04, 1.4251e-03, 2.2395e-03,
+    3.5191e-03, 5.5300e-03, 9.1180e-03, 1.5030e-02, 2.4780e-02, 4.0850e-02,
+    6.7340e-02, 1.1100e-01, 1.8300e-01, 3.0250e-01, 5.0000e-01, 8.2100e-01,
+    1.3530e+00, 2.2310e+00, 3.6790e+00, 6.0655e+00, 2.0000e+01,
+]
+
+# Source: NJOY2016 GROUPR module (ign=3), Los Alamos National Laboratory
+# https://github.com/njoy/NJOY2016/blob/master/src/groupr.f90
+LANL30 = [
+    1.3900e-10, 1.5200e-07, 4.1400e-07, 1.1300e-06, 3.0600e-06, 8.3200e-06,
+    2.2600e-05, 6.1400e-05, 1.6700e-04, 4.5400e-04, 1.2350e-03, 3.3500e-03,
+    9.1200e-03, 2.4800e-02, 6.7600e-02, 1.8400e-01, 3.0300e-01, 5.0000e-01,
+    8.2300e-01, 1.3530e+00, 1.7380e+00, 2.2320e+00, 2.8650e+00, 3.6800e+00,
+    6.0700e+00, 7.7900e+00, 1.0000e+01, 1.2000e+01, 1.3500e+01, 1.5000e+01,
+    1.7000e+01,
+]
+
+# Source: Serpent Monte Carlo wiki (VTT Technical Research Centre of Finland)
+# https://serpent.vtt.fi/mediawiki/index.php/XMAS_172-group_structure
+XMAS172 = [
+    1.0000e-11, 3.0000e-09, 5.0000e-09, 6.9000e-09, 1.0000e-08, 1.5000e-08,
+    2.0000e-08, 2.5000e-08, 3.0000e-08, 3.5000e-08, 4.2000e-08, 5.0000e-08,
+    5.8000e-08, 6.7000e-08, 7.7000e-08, 8.0000e-08, 9.5000e-08, 1.0000e-07,
+    1.1500e-07, 1.3400e-07, 1.4000e-07, 1.6000e-07, 1.8000e-07, 1.8900e-07,
+    2.2000e-07, 2.4800e-07, 2.8000e-07, 3.0000e-07, 3.1450e-07, 3.2000e-07,
+    3.5000e-07, 3.9100e-07, 4.0000e-07, 4.3300e-07, 4.8500e-07, 5.0000e-07,
+    5.4000e-07, 6.2500e-07, 7.0500e-07, 7.8000e-07, 7.9000e-07, 8.5000e-07,
+    8.6000e-07, 9.1000e-07, 9.3000e-07, 9.5000e-07, 9.7200e-07, 9.8600e-07,
+    9.9600e-07, 1.0200e-06, 1.0350e-06, 1.0450e-06, 1.0710e-06, 1.0970e-06,
+    1.1100e-06, 1.1254e-06, 1.1500e-06, 1.1700e-06, 1.2350e-06, 1.3000e-06,
+    1.3375e-06, 1.3700e-06, 1.4450e-06, 1.4750e-06, 1.5000e-06, 1.5900e-06,
+    1.6700e-06, 1.7550e-06, 1.8400e-06, 1.9300e-06, 2.0200e-06, 2.1000e-06,
+    2.1300e-06, 2.3600e-06, 2.5500e-06, 2.6000e-06, 2.7200e-06, 2.7679e-06,
+    3.3000e-06, 3.3808e-06, 4.0000e-06, 4.1293e-06, 5.0435e-06, 5.3464e-06,
+    6.1601e-06, 7.5240e-06, 8.3153e-06, 9.1898e-06, 9.9056e-06, 1.1225e-05,
+    1.3710e-05, 1.5928e-05, 1.9455e-05, 2.2603e-05, 2.4981e-05, 2.7608e-05,
+    3.0511e-05, 3.3720e-05, 3.7267e-05, 4.0169e-05, 4.5517e-05, 4.8252e-05,
+    5.1578e-05, 5.5595e-05, 6.7904e-05, 7.5674e-05, 9.1661e-05, 1.3674e-04,
+    1.4863e-04, 2.0400e-04, 3.0433e-04, 3.7170e-04, 4.5400e-04, 6.7729e-04,
+    7.4852e-04, 9.1424e-04, 1.0104e-03, 1.2341e-03, 1.4338e-03, 1.5073e-03,
+    2.0347e-03, 2.2487e-03, 3.3546e-03, 3.5266e-03, 5.0045e-03, 5.5308e-03,
+    7.4659e-03, 9.1188e-03, 1.1138e-02, 1.5034e-02, 1.6616e-02, 2.4788e-02,
+    2.7394e-02, 2.9283e-02, 3.6979e-02, 4.0868e-02, 5.5166e-02, 6.7380e-02,
+    8.2298e-02, 1.1109e-01, 1.2277e-01, 1.8316e-01, 2.4724e-01, 2.7324e-01,
+    3.0197e-01, 4.0762e-01, 4.5049e-01, 4.9787e-01, 5.5023e-01, 6.0810e-01,
+    8.2085e-01, 9.0718e-01, 1.0026e+00, 1.1080e+00, 1.2246e+00, 1.3534e+00,
+    1.6530e+00, 2.0190e+00, 2.2313e+00, 2.4660e+00, 3.0119e+00, 3.6788e+00,
+    4.4933e+00, 5.4881e+00, 6.0653e+00, 6.7032e+00, 8.1873e+00, 1.0000e+01,
+    1.1618e+01, 1.3840e+01, 1.4918e+01, 1.7333e+01, 1.9640e+01,
 ]

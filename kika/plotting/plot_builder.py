@@ -154,6 +154,7 @@ class PlotBuilder:
         self._y_label: Optional[str] = None
         self._title = _NOT_SET  # Use sentinel to distinguish "not set" from "explicitly None"
         self._legend_loc: str = 'best'
+        self._legend_outside: bool = False
         self._use_log_x: bool = False
         self._use_log_y: bool = False
         self._x_lim: Optional[Tuple[float, float]] = None
@@ -385,21 +386,24 @@ class PlotBuilder:
         self._y_lim = y_lim
         return self
     
-    def set_legend(self, loc: str = 'best') -> 'PlotBuilder':
+    def set_legend(self, loc: str = 'best', outside: bool = False) -> 'PlotBuilder':
         """
         Set legend location.
-        
+
         Parameters
         ----------
         loc : str
             Legend location
-            
+        outside : bool
+            If True, place legend outside the plot area to the right
+
         Returns
         -------
         PlotBuilder
             Self for method chaining
         """
         self._legend_loc = loc
+        self._legend_outside = outside
         return self
     
     def set_grid(
@@ -1794,7 +1798,11 @@ class PlotBuilder:
         handles, labels = self.ax.get_legend_handles_labels()
         if handles:
             legend_kwargs = {'loc': self._legend_loc, 'framealpha': 0.9}
-            
+
+            if self._legend_outside:
+                legend_kwargs['bbox_to_anchor'] = (1.02, 1)
+                legend_kwargs['loc'] = 'upper left'
+
             if self.style == 'light':
                 # For light style, use framed legend with black edge (publication style)
                 legend_kwargs.update({
@@ -1805,11 +1813,14 @@ class PlotBuilder:
             else:
                 # For dark style, use default fancybox
                 legend_kwargs['fancybox'] = True
-            
+
             if self._legend_fontsize is not None:
                 legend_kwargs['fontsize'] = self._legend_fontsize
-            
+
             self.ax.legend(**legend_kwargs)
+
+            if self._legend_outside:
+                self.fig.subplots_adjust(right=0.78)
         
         # Apply tick parameters if specified
         if hasattr(self, '_tick_params') and self._tick_params:

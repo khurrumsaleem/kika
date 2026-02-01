@@ -544,25 +544,39 @@ class Ace:
         particle_type = kwargs.get('particle_type', 'neutron')
         particle_idx = kwargs.get('particle_idx', 0)
         num_points = kwargs.get('num_points', 100)
-        interpolate = kwargs.get('interpolate', False)
-        
+        interpolate = kwargs.get('interpolate', True)
+        normalize_to_xs = kwargs.get('normalize_to_xs', False)
+        cross_section_unit = kwargs.get('cross_section_unit', 'b')
+        energy_folding = kwargs.get('energy_folding', False)
+        tof = kwargs.get('tof', (27.037, 5.0))
+
         # Get the angular distribution data as a DataFrame
-        df = self.angular_distributions.to_dataframe(
+        df_kwargs = dict(
             mt=mt,
             energy=energy,
             particle_type=particle_type,
             particle_idx=particle_idx,
             ace=self,
             num_points=num_points,
-            interpolate=interpolate
+            interpolate=interpolate,
+            normalize_to_xs=normalize_to_xs,
+            cross_section_unit=cross_section_unit,
+            energy_folding=energy_folding,
+            tof=tof,
         )
-        
+        df = self.angular_distributions.to_dataframe(**df_kwargs)
+
         if df is None:
             raise ValueError(f"Could not extract angular distribution for MT={mt} at energy={energy} MeV")
-        
-        # Extract cosine (mu) and pdf from the DataFrame
+
+        # Extract cosine (mu) and the correct y-column from the DataFrame
         mu = df['cosine'].values
-        pdf = df['pdf'].values
+        if 'dsigma_dOmega' in df.columns:
+            pdf = df['dsigma_dOmega'].values
+        elif 'dsigma_dmu' in df.columns:
+            pdf = df['dsigma_dmu'].values
+        else:
+            pdf = df['pdf'].values
         
         # Get label
         label = kwargs.get('label', None)
