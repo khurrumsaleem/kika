@@ -105,8 +105,8 @@ def build_iaea_url(z: int, a: int, symbol: str, library: str, particle: str = "n
     if mat is None:
         raise ValueError(f"No MAT number found for ZAID {zaid}")
 
-    # Format: n_ZZZ-Element-Mass_MAT.zip
-    filename = f"{particle}_{z:03d}-{symbol}-{a}_{mat}.zip"
+    # Format: n_ZZZ-Element-Mass_MMMM.zip (MAT padded to 4 digits)
+    filename = f"{particle}_{z:03d}-{symbol}-{a}_{mat:04d}.zip"
     return f"{IAEA_BASE_URL}/{library_path}/{particle}/{filename}"
 
 
@@ -196,8 +196,12 @@ class IAEAClient:
             raise IsotopeNotFoundError(str(isotope), library) from e
 
         try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; rv:91.0) Gecko/20100101 Firefox/91.0",
+                "Accept": "application/zip, application/octet-stream, */*",
+            }
             with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
-                response = client.get(url)
+                response = client.get(url, headers=headers)
                 response.raise_for_status()
         except httpx.TimeoutException:
             raise NetworkError(f"Request timed out after {self.timeout}s", url)

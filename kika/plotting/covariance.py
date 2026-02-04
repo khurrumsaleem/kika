@@ -9,6 +9,7 @@ the new, cleaner implementation.
 """
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import Normalize
 from typing import Union, Sequence, Tuple, List, Optional
 from kika.cov.covmat import CovMat
 from kika.cov.mf34_covmat import MF34CovMat
@@ -22,14 +23,25 @@ def plot_covariance_heatmap(
     mt: Union[int, Sequence[int], Tuple[int, int]],
     *,
     matrix_type: str = "corr",
-    figsize: Tuple[float, float] = (6, 6),
+    figsize: Tuple[float, float] = (8, 8),
     dpi: int = 300,
     font_family: str = "serif",
-    vmax: float | None = None,
-    vmin: float | None = None,
     show_uncertainties: bool = True,
+    show_energy_ticks: bool = True,
+    show_block_labels: bool = True,
+    show_colorbar: bool = True,
     scale: str = "log",
     energy_range: Optional[Tuple[float, float]] = None,
+    cmap: Optional[str] = None,
+    norm: Optional[Normalize] = None,
+    colorbar_label: Optional[str] = None,
+    title: Optional[str] = "default",
+    title_fontsize: Optional[float] = None,
+    tick_fontsize: Optional[float] = None,
+    energy_tick_fontsize: Optional[float] = None,
+    block_label_fontsize: Optional[float] = None,
+    colorbar_fontsize: Optional[float] = None,
+    show: bool = False,
 ) -> plt.Figure:
     """
     Draw a covariance or correlation matrix heatmap for one or more isotopes and
@@ -62,14 +74,39 @@ def plot_covariance_heatmap(
         Dots per inch for figure resolution
     font_family : str, default "serif"
         Font family for text elements
-    vmax, vmin : float, optional
-        DEPRECATED: These parameters are ignored. Auto-scaling is used.
     show_uncertainties : bool, default True
         Whether to show uncertainty plots above the heatmap
+    show_energy_ticks : bool, default True
+        Whether to show energy tick marks on secondary axes (top/right)
+    show_block_labels : bool, default True
+        Whether to show block labels (MT numbers)
+    show_colorbar : bool, default True
+        Whether to show the colorbar
     scale : str, default "log"
         Energy axis scale: "log"/"logarithmic" or "lin"/"linear'
     energy_range : tuple of float, optional
         Energy range (min, max) for filtering. Values in eV.
+    cmap : str, optional
+        Colormap name (e.g., 'viridis', 'RdYlGn')
+    norm : matplotlib.colors.Normalize, optional
+        Custom normalization for the colormap
+    colorbar_label : str, optional
+        Override colorbar label text
+    title : str or None, default "default"
+        Title for the plot. Use "default" for auto-generated title from
+        heatmap_data.label, None to hide the title, or a custom string.
+    title_fontsize : float, optional
+        Font size for the title
+    tick_fontsize : float, optional
+        Font size for tick labels
+    energy_tick_fontsize : float, optional
+        Font size for energy tick labels on secondary axes
+    block_label_fontsize : float, optional
+        Font size for MT block labels
+    colorbar_fontsize : float, optional
+        Font size for colorbar label
+    show : bool, default False
+        Whether to display the figure immediately
 
     Returns
     -------
@@ -119,7 +156,7 @@ def plot_covariance_heatmap(
         matrix_type_normalized = "cov"
     else:
         raise ValueError(f"matrix_type must be 'corr'/'correlation' or 'cov'/'covariance', got '{matrix_type}'")
-    
+
     # Normalize scale parameter
     scale_normalized = scale.lower()
     if scale_normalized in ("log", "logarithmic"):
@@ -128,7 +165,7 @@ def plot_covariance_heatmap(
         scale_normalized = "linear"
     else:
         raise ValueError(f"scale must be 'log'/'logarithmic' or 'lin'/'linear', got '{scale}'")
-    
+
     # Prepare the heatmap data using the new infrastructure
     heatmap_data = covmat.to_heatmap_data(
         nuclide=nuclide,
@@ -137,34 +174,43 @@ def plot_covariance_heatmap(
         scale=scale_normalized,
         energy_range=energy_range,
     )
-    
-    # Warn about deprecated vmin/vmax parameters
-    import warnings
-    if vmin is not None or vmax is not None:
-        warnings.warn(
-            "vmin and vmax parameters are deprecated and will be ignored. "
-            "Auto-scaling is now used for colorbar normalization.",
-            DeprecationWarning,
-            stacklevel=2
-        )
+
+    # Build styling overrides for add_heatmap()
+    styling_overrides = {}
+    if cmap is not None:
+        styling_overrides["cmap"] = cmap
+    if norm is not None:
+        styling_overrides["norm"] = norm
+    if colorbar_label is not None:
+        styling_overrides["colorbar_label"] = colorbar_label
 
     # Create the plot using HeatmapBuilder (always use light style for heatmaps)
     builder = HeatmapBuilder(style="light", figsize=figsize, dpi=dpi, font_family=font_family)
+
+    # Set title via set_labels() so the builder handles placement
+    if title == "default":
+        # Let the builder use heatmap_data.label as default
+        pass
+    elif title is None:
+        builder.set_labels(title="")
+    else:
+        builder.set_labels(title=title)
+
+    # Set font sizes if provided
+    if title_fontsize is not None or tick_fontsize is not None:
+        builder.set_font_sizes(title=title_fontsize, ticks=tick_fontsize)
+
     fig = builder.add_heatmap(
         heatmap_data,
         show_uncertainties=show_uncertainties,
-    ).build()
-    # If uncertainties panels are shown, the HeatmapBuilder places the suptitle
-    # a bit high; nudge it down slightly for better layout.
-    if show_uncertainties and fig is not None:
-        # Determine effective title used by builder/heatmap_data
-        effective_title = getattr(builder, "_title", None) or getattr(heatmap_data, "label", None)
-        if effective_title:
-            try:
-                fig.suptitle(effective_title, y=0.94)
-            except Exception:
-                # Fallback: ignore if suptitle fails for any reason
-                pass
+        show_energy_ticks=show_energy_ticks,
+        show_block_labels=show_block_labels,
+        show_colorbar=show_colorbar,
+        energy_tick_fontsize=energy_tick_fontsize,
+        block_label_fontsize=block_label_fontsize,
+        colorbar_fontsize=colorbar_fontsize,
+        **styling_overrides,
+    ).build(show=show)
 
     return fig
 
@@ -176,15 +222,25 @@ def plot_mf34_covariance_heatmap(
     legendre_coeffs: Union[int, List[int], Tuple[int, int]],
     *,
     matrix_type: str = "corr",
-    figsize: Tuple[float, float] = (6, 6),
+    figsize: Tuple[float, float] = (8, 8),
     dpi: int = 300,
     font_family: str = "serif",
-    vmax: float | None = None,
-    vmin: float | None = None,
     show_uncertainties: bool = False,
+    show_energy_ticks: bool = True,
+    show_block_labels: bool = True,
+    show_colorbar: bool = True,
     cmap: Optional[str] = None,
+    norm: Optional[Normalize] = None,
+    colorbar_label: Optional[str] = None,
     scale: str = "log",
     energy_range: Optional[Tuple[float, float]] = None,
+    title: Optional[str] = "default",
+    title_fontsize: Optional[float] = None,
+    tick_fontsize: Optional[float] = None,
+    energy_tick_fontsize: Optional[float] = None,
+    block_label_fontsize: Optional[float] = None,
+    colorbar_fontsize: Optional[float] = None,
+    show: bool = False,
 ) -> plt.Figure:
     """
     Draw a covariance/correlation heatmap for MF34 angular distribution data
@@ -217,16 +273,39 @@ def plot_mf34_covariance_heatmap(
         Dots per inch for figure resolution
     font_family : str, default "serif"
         Font family for text elements
-    vmax, vmin : float, optional
-        DEPRECATED: These parameters are ignored. Auto-scaling is used.
     show_uncertainties : bool, default False
         Whether to show uncertainty plots above the heatmap
+    show_energy_ticks : bool, default True
+        Whether to show energy tick marks on secondary axes (top/right)
+    show_block_labels : bool, default True
+        Whether to show block labels (Legendre orders)
+    show_colorbar : bool, default True
+        Whether to show the colorbar
     cmap : str, optional
         Colormap name (e.g., 'viridis', 'RdYlGn')
+    norm : matplotlib.colors.Normalize, optional
+        Custom normalization for the colormap
+    colorbar_label : str, optional
+        Override colorbar label text
     scale : str, default "log"
         Energy axis scale: "log"/"logarithmic" or "lin"/"linear"
     energy_range : tuple of float, optional
         Energy range (min, max) for filtering. Values in eV.
+    title : str or None, default "default"
+        Title for the plot. Use "default" for auto-generated title from
+        heatmap_data.label, None to hide the title, or a custom string.
+    title_fontsize : float, optional
+        Font size for the title
+    tick_fontsize : float, optional
+        Font size for tick labels
+    energy_tick_fontsize : float, optional
+        Font size for energy tick labels on secondary axes
+    block_label_fontsize : float, optional
+        Font size for Legendre order block labels
+    colorbar_fontsize : float, optional
+        Font size for colorbar label
+    show : bool, default False
+        Whether to display the figure immediately
 
     Returns
     -------
@@ -241,21 +320,21 @@ def plot_mf34_covariance_heatmap(
     Examples
     --------
     Plot correlation matrix for Legendre coefficients L=1,2,3:
-    
+
     >>> fig = plot_mf34_covariance_heatmap(
     ...     mf34_covmat, nuclide=92235, mt=2,
     ...     legendre_coeffs=[1, 2, 3]
     ... )
 
     Plot with nuclide string:
-    
+
     >>> fig = plot_mf34_covariance_heatmap(
     ...     mf34_covmat, nuclide='U235', mt=2,
     ...     legendre_coeffs=[1, 2, 3]
     ... )
 
     Plot covariance for a single Legendre coefficient with uncertainties:
-    
+
     >>> fig = plot_mf34_covariance_heatmap(
     ...     mf34_covmat, nuclide='Fe56', mt=2,
     ...     legendre_coeffs=1, matrix_type="cov",
@@ -268,12 +347,12 @@ def plot_mf34_covariance_heatmap(
     """
     # Convert nuclide to ZAID if string
     from kika._utils import symbol_to_zaid
-    
+
     if isinstance(nuclide, str):
         isotope = symbol_to_zaid(nuclide)
     else:
         isotope = nuclide
-    
+
     # Normalize matrix_type
     matrix_type_normalized = matrix_type.lower()
     if matrix_type_normalized in ("corr", "correlation"):
@@ -282,7 +361,7 @@ def plot_mf34_covariance_heatmap(
         matrix_type_normalized = "cov"
     else:
         raise ValueError(f"matrix_type must be 'corr'/'correlation' or 'cov'/'covariance', got '{matrix_type}'")
-    
+
     # Normalize scale
     scale_normalized = scale.lower()
     if scale_normalized in ("log", "logarithmic"):
@@ -291,7 +370,7 @@ def plot_mf34_covariance_heatmap(
         scale_normalized = "linear"
     else:
         raise ValueError(f"scale must be 'log'/'logarithmic' or 'lin'/'linear', got '{scale}'")
-    
+
     # Prepare the heatmap data using the new infrastructure
     heatmap_data = mf34_covmat.to_heatmap_data(
         nuclide=nuclide,
@@ -301,40 +380,44 @@ def plot_mf34_covariance_heatmap(
         scale=scale_normalized,
         energy_range=energy_range,
     )
-    
-    # Override colormap if provided
-    if cmap is not None:
-        heatmap_data.cmap = cmap
 
-    # Warn about deprecated vmin/vmax parameters
-    import warnings
-    if vmin is not None or vmax is not None:
-        warnings.warn(
-            "vmin and vmax parameters are deprecated and will be ignored. "
-            "Auto-scaling is now used for colorbar normalization.",
-            DeprecationWarning,
-            stacklevel=2
-        )
+    # Build styling overrides for add_heatmap()
+    styling_overrides = {}
+    if cmap is not None:
+        styling_overrides["cmap"] = cmap
+    if norm is not None:
+        styling_overrides["norm"] = norm
+    if colorbar_label is not None:
+        styling_overrides["colorbar_label"] = colorbar_label
 
     # Create the plot using HeatmapBuilder (always use light style for heatmaps)
     builder = HeatmapBuilder(style="light", figsize=figsize, dpi=dpi, font_family=font_family)
+
+    # Set title via set_labels() so the builder handles placement
+    if title == "default":
+        # Let the builder use heatmap_data.label as default
+        pass
+    elif title is None:
+        builder.set_labels(title="")
+    else:
+        builder.set_labels(title=title)
+
+    # Set font sizes if provided
+    if title_fontsize is not None or tick_fontsize is not None:
+        builder.set_font_sizes(title=title_fontsize, ticks=tick_fontsize)
+
     fig = builder.add_heatmap(
         heatmap_data,
         show_uncertainties=show_uncertainties,
-    ).build()
+        show_energy_ticks=show_energy_ticks,
+        show_block_labels=show_block_labels,
+        show_colorbar=show_colorbar,
+        energy_tick_fontsize=energy_tick_fontsize,
+        block_label_fontsize=block_label_fontsize,
+        colorbar_fontsize=colorbar_fontsize,
+        **styling_overrides,
+    ).build(show=show)
 
-    # If uncertainties panels are shown, the HeatmapBuilder places the suptitle
-    # a bit high; nudge it down slightly for better layout.
-    if show_uncertainties and fig is not None:
-        # Determine effective title used by builder/heatmap_data
-        effective_title = getattr(builder, "_title", None) or getattr(heatmap_data, "label", None)
-        if effective_title:
-            try:
-                fig.suptitle(effective_title, y=0.93)
-            except Exception:
-                # Fallback: ignore if suptitle fails for any reason
-                pass
-    
     return fig
 
 
@@ -353,11 +436,12 @@ def plot_uncertainties(
     xscale: str = "log",
     yscale: str = "linear",
     title: Optional[str] = "default",
+    show: bool = False,
     **styling_kwargs
 ) -> plt.Figure:
     """
     Plot relative uncertainties for one or more (ZAID, MT) pairs from covariance data.
-    
+
     This modern implementation uses the PlotBuilder infrastructure with to_plot_data()
     for cleaner, more maintainable code.
 
@@ -365,14 +449,14 @@ def plot_uncertainties(
     ----------
     covmat : CovMat
         The covariance matrix object
-    zaid : int or sequence of int
-        Isotope ID(s) to plot (e.g., 92235 for U-235)
+    nuclide : int, str, or sequence of int/str
+        Isotope ID(s) to plot (e.g., 92235 for U-235, 'U235')
     mt : int or sequence of int
         Reaction MT number(s) to plot
     energy_range : tuple of float, optional
         Energy range (min, max) for x-axis in MeV. If None, uses full range.
     sigma : float, default 1.0
-        Number of sigma levels for uncertainty (e.g., 1.0 for 1σ, 2.0 for 2σ)
+        Number of sigma levels for uncertainty (e.g., 1.0 for 1-sigma, 2.0 for 2-sigma)
     style : str, default "light"
         Plot style: 'light', 'dark', 'paper', 'publication', 'presentation'
     figsize : tuple, default (8, 5)
@@ -383,6 +467,15 @@ def plot_uncertainties(
         Font family for text elements
     legend_loc : str, default "best"
         Legend location
+    xscale : str, default "log"
+        X-axis scale: "log"/"logarithmic" or "lin"/"linear"
+    yscale : str, default "linear"
+        Y-axis scale: "log"/"logarithmic" or "lin"/"linear"
+    title : str or None, default "default"
+        Title for the plot. Use "default" for auto-generated title,
+        None to hide the title, or a custom string.
+    show : bool, default False
+        Whether to display the figure immediately
     **styling_kwargs
         Additional styling arguments (color, linestyle, linewidth, etc.)
 
@@ -394,17 +487,17 @@ def plot_uncertainties(
     Examples
     --------
     Plot uncertainties for a single reaction:
-    
-    >>> fig = plot_uncertainties(covmat, zaid=92235, mt=2)
-    
+
+    >>> fig = plot_uncertainties(covmat, nuclide=92235, mt=2)
+
     Plot multiple reactions:
-    
-    >>> fig = plot_uncertainties(covmat, zaid=92235, mt=[2, 18, 102])
-    
+
+    >>> fig = plot_uncertainties(covmat, nuclide=92235, mt=[2, 18, 102])
+
     Plot with custom styling:
-    
+
     >>> fig = plot_uncertainties(
-    ...     covmat, zaid=92235, mt=2,
+    ...     covmat, nuclide=92235, mt=2,
     ...     sigma=2.0, style='presentation'
     ... )
 
@@ -430,7 +523,7 @@ def plot_uncertainties(
         else:
             raise ValueError(f"Invalid nuclide entry: {n!r}")
     mt_list = [mt] if isinstance(mt, int) else list(mt)
-    
+
     # Create PlotBuilder
     builder = PlotBuilder(style=style, figsize=figsize, dpi=dpi, font_family=font_family)
 
@@ -452,14 +545,14 @@ def plot_uncertainties(
         raise ValueError(f"Invalid yscale '{yscale}'; expected 'log' or 'linear'")
 
     builder.set_scales(log_x=log_x, log_y=log_y)
-    
+
     # Add uncertainty data for each (zaid, mt) pair
     for z in zaid_list:
         for m in mt_list:
             try:
                 # Get uncertainty data using to_plot_data
-                _, unc_data = covmat.to_plot_data(zaid=z, mt=m, sigma=sigma, **styling_kwargs)
-                
+                _, unc_data = covmat.to_plot_data(nuclide=z, mt=m, sigma=sigma, **styling_kwargs)
+
                 if unc_data is not None:
                     # Add to plot
                     builder.add_data(unc_data)
@@ -467,11 +560,11 @@ def plot_uncertainties(
                 # Skip if data not available
                 print(f"Warning: Could not plot uncertainties for ZAID={z}, MT={m}: {e}")
                 continue
-    
+
     # Set energy range if provided
     if energy_range is not None:
         builder.set_limits(x_lim=(energy_range[0], energy_range[1]))
-    
+
     # Set title behavior:
     # - title == "default": construct a sensible default title
     # - title is None: explicitly omit title
@@ -502,7 +595,7 @@ def plot_uncertainties(
         builder.set_labels(title=title)
 
     # Build and configure the plot
-    fig = builder.build()
+    fig = builder.build(show=show)
 
     # Add legend
     if fig.axes:
@@ -530,11 +623,12 @@ def plot_multigroup_xs(
     xscale: str = "log",
     yscale: str = "linear",
     title: Optional[str] = "default",
+    show: bool = False,
     **styling_kwargs
 ) -> plt.Figure:
     """
     Plot multigroup cross sections with optional uncertainty bands.
-    
+
     This modern implementation uses the PlotBuilder infrastructure with to_plot_data()
     for cleaner, more maintainable code.
 
@@ -542,8 +636,8 @@ def plot_multigroup_xs(
     ----------
     covmat : CovMat
         The covariance matrix object
-    zaid : int or sequence of int
-        Isotope ID(s) to plot (e.g., 92235 for U-235)
+    nuclide : int, str, or sequence of int/str
+        Isotope ID(s) to plot (e.g., 92235 for U-235, 'U235')
     mt : int or sequence of int
         Reaction MT number(s) to plot
     energy_range : tuple of float, optional
@@ -551,7 +645,7 @@ def plot_multigroup_xs(
     show_uncertainties : bool, default False
         Whether to show uncertainty bands around cross sections
     sigma : float, default 1.0
-        Number of sigma levels for uncertainty bands (e.g., 1.0 for 1σ, 2.0 for 2σ)
+        Number of sigma levels for uncertainty bands (e.g., 1.0 for 1-sigma, 2.0 for 2-sigma)
     style : str, default "light"
         Plot style: 'light', 'dark', 'paper', 'publication', 'presentation'
     figsize : tuple, default (8, 5)
@@ -562,6 +656,15 @@ def plot_multigroup_xs(
         Font family for text elements
     legend_loc : str, default "best"
         Legend location
+    xscale : str, default "log"
+        X-axis scale: "log"/"logarithmic" or "lin"/"linear"
+    yscale : str, default "linear"
+        Y-axis scale: "log"/"logarithmic" or "lin"/"linear"
+    title : str or None, default "default"
+        Title for the plot. Use "default" for auto-generated title,
+        None to hide the title, or a custom string.
+    show : bool, default False
+        Whether to display the figure immediately
     **styling_kwargs
         Additional styling arguments (color, linestyle, linewidth, etc.)
 
@@ -573,13 +676,13 @@ def plot_multigroup_xs(
     Examples
     --------
     Plot cross sections for a single reaction:
-    
-    >>> fig = plot_multigroup_xs(covmat, zaid=92235, mt=2)
-    
+
+    >>> fig = plot_multigroup_xs(covmat, nuclide=92235, mt=2)
+
     Plot multiple reactions with uncertainty bands:
-    
+
     >>> fig = plot_multigroup_xs(
-    ...     covmat, zaid=92235, mt=[2, 18, 102],
+    ...     covmat, nuclide=92235, mt=[2, 18, 102],
     ...     show_uncertainties=True
     ... )
 
@@ -628,14 +731,14 @@ def plot_multigroup_xs(
         raise ValueError(f"Invalid yscale '{yscale}'; expected 'log' or 'linear'")
 
     builder.set_scales(log_x=log_x, log_y=log_y)
-    
+
     # Add cross section data for each (zaid, mt) pair
     for z in zaid_list:
         for m in mt_list:
             try:
                 # Get XS and uncertainty data using to_plot_data
-                xs_data, unc_data = covmat.to_plot_data(zaid=z, mt=m, sigma=sigma, **styling_kwargs)
-                
+                xs_data, unc_data = covmat.to_plot_data(nuclide=z, mt=m, sigma=sigma, **styling_kwargs)
+
                 if xs_data is not None:
                     # Add to plot with optional uncertainty
                     if show_uncertainties and unc_data is not None:
@@ -646,11 +749,11 @@ def plot_multigroup_xs(
                 # Skip if data not available
                 print(f"Warning: Could not plot XS for ZAID={z}, MT={m}: {e}")
                 continue
-    
+
     # Set energy range if provided
     if energy_range is not None:
         builder.set_limits(x_lim=(energy_range[0], energy_range[1]))
-    
+
     # Set title behavior (same semantics as uncertainties plot)
     if title == "default":
         try:
@@ -676,7 +779,7 @@ def plot_multigroup_xs(
         builder.set_labels(title=title)
 
     # Build and configure the plot
-    fig = builder.build()
+    fig = builder.build(show=show)
 
     # Add legend and labels
     if fig.axes:

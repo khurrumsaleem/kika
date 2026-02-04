@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 # IAEA Nuclear Data Service base URL
-IAEA_BASE_URL = "https://www-nds.iaea.org/public/download-endf"
+IAEA_BASE_URL = "https://nds.iaea.org/public/download-endf"
 
 # Default cache directory (can be overridden via environment variable)
 DEFAULT_CACHE_DIR = Path.home() / ".kika" / "endf_cache"

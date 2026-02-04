@@ -118,7 +118,10 @@ def download_endf(
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Parse isotope to get ZAID for cache lookup
-    z, a, _ = parse_isotope(isotope)
+    try:
+        z, a, _ = parse_isotope(isotope)
+    except ValueError as e:
+        raise IsotopeNotFoundError(str(isotope), library) from e
     zaid = z * 1000 + a
 
     # Normalize library name
@@ -219,7 +222,10 @@ def fetch_endf(
     client = IAEAClient(timeout=timeout)
 
     # Parse isotope to get ZAID for cache lookup
-    z, a, _ = parse_isotope(isotope)
+    try:
+        z, a, _ = parse_isotope(isotope)
+    except ValueError as e:
+        raise IsotopeNotFoundError(str(isotope), library) from e
     zaid = z * 1000 + a
 
     # Normalize library name
