@@ -7,7 +7,12 @@ docs/build/
 # VSCODE
 .vscode/
 *.code-workspace
+
+# AI tooling
 .claude/
+.agents/
+.codex/
+.opencode/
 
 # Personal docs
 _README.md
