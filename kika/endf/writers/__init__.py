@@ -8,14 +8,21 @@ This module provides utilities for:
 """
 
 from .endf_writer import ENDFWriter, replace_mf_section, replace_mt_section
-from .mf34_writer import create_mf34_from_covariance, write_mf34_to_file
+from .mf34_writer import (
+    create_mf34_from_covariance,
+    write_mf34_to_file,
+    remove_mf34_from_file,
+    merge_mf34,
+)
 
 __all__ = [
     # ENDF file modification
     'ENDFWriter',
     'replace_mf_section',
     'replace_mt_section',
-    # MF34 covariance creation
+    # MF34 covariance creation and manipulation
     'create_mf34_from_covariance',
     'write_mf34_to_file',
+    'remove_mf34_from_file',
+    'merge_mf34',
 ]

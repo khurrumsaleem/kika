@@ -63,8 +63,8 @@ MT_NUMBER = 2           # Elastic scattering
 ENERGY_MIN_MEV = 1.0
 ENERGY_MAX_MEV = 3.0
 
-# Use recommended method
-EXPERIMENT_SELECTION_METHOD = "global_convolution"
+# Default method
+EXPERIMENT_SELECTION_METHOD = "energy_bin"
 
 # Output options
 N_SAMPLES = 100
@@ -72,12 +72,38 @@ GENERATE_NOMINAL_ENDF = True
 GENERATE_COVARIANCE = True
 ```
 
-### Recommended Production Configuration
+### Recommended Production Configuration (energy_bin)
 
 ```python
-# === RECOMMENDED SETTINGS FOR PRODUCTION ===
+# === RECOMMENDED SETTINGS FOR PRODUCTION (energy_bin) ===
 
-# Method selection
+# Method selection (default)
+EXPERIMENT_SELECTION_METHOD = "energy_bin"
+
+# Shape-only fitting and weighting
+FREEZE_C0 = True                  # Shape-only refits
+NORMALIZE_BY_N_POINTS = True      # Equal weight per experiment
+USE_ENERGY_JITTER = True          # Cross-bin energy correlations
+
+# Fitting parameters
+MAX_LEGENDRE_DEGREE = 8
+SELECT_DEGREE = "aicc"
+USE_BAND_DISCREPANCY = True
+MIN_RELATIVE_UNCERTAINTY = 0.05   # 5% uncertainty floor
+
+# Output
+N_SAMPLES = 500
+GENERATE_MF34 = True
+N_PROCS = 8
+```
+
+### Alternative Production Configuration (global_convolution)
+
+```python
+# === PRODUCTION SETTINGS FOR global_convolution ===
+# Prefer this method when energy resolution smearing is important
+# or data is sparse across the energy range.
+
 EXPERIMENT_SELECTION_METHOD = "global_convolution"
 
 # Global convolution tuning
@@ -89,8 +115,7 @@ GLOBAL_CONV_SHAPE_ONLY = True     # Two-pass shape-only fit
 # Fitting parameters
 MAX_LEGENDRE_DEGREE = 8
 SELECT_DEGREE = "aicc"
-USE_BAND_DISCREPANCY = True
-MIN_RELATIVE_UNCERTAINTY = 0.03   # 3% uncertainty floor
+MIN_RELATIVE_UNCERTAINTY = 0.05   # 5% uncertainty floor
 
 # Output
 N_SAMPLES = 500
@@ -102,10 +127,10 @@ N_PROCS = 8
 
 | Use Case | Method | Key Settings |
 |----------|--------|--------------|
-| Production evaluation | `global_convolution` | `GLOBAL_CONV_SHAPE_ONLY=True`, `N_SAMPLES=500` |
-| Quick validation | `energy_bin` | `N_SAMPLES=10`, `N_PROCS=1` |
+| Production (default) | `energy_bin` | `FREEZE_C0=True`, `USE_ENERGY_JITTER=True`, `N_SAMPLES=500` |
+| Production (sparse data) | `global_convolution` | `GLOBAL_CONV_SHAPE_ONLY=True`, `GLOBAL_CONV_LAMBDA=0.01` |
+| Quick validation | `energy_bin` | `N_SAMPLES=25`, `N_PROCS=1` |
 | Debug single energy | `kernel_weights` | `DEDUPE_NOMINAL=True`, `DEDUPE_MC=False` |
-| Sparse data regions | `global_convolution` | Increase `GLOBAL_CONV_LAMBDA` to 0.01 |
 | Dense data regions | `energy_bin` | `NORMALIZE_BY_N_POINTS=True` |
 
 ---
@@ -125,11 +150,11 @@ Three methods are available for selecting and weighting EXFOR data. Each has dif
 | **Handles sparse data** | Excellent (via regularization) | Good | Poor |
 | **Energy correlations** | Naturally included | Via two-pass dedupe | Via energy jitter |
 | **Shape-only mode** | Two-pass (Improvement 3.4) | Not available | FREEZE_C0 (Improvement 1.3) |
-| **Recommended for** | Production | Debugging, comparisons | Quick tests |
+| **Recommended for** | Sparse data, resolution-critical | Debugging, comparisons | General use (default) |
 
 ---
 
-### 3.1 Global Convolution (`global_convolution`) - RECOMMENDED
+### 3.1 Global Convolution (`global_convolution`)
 
 Fits ALL ENDF energy points simultaneously in a single large linear system. Each EXFOR measurement contributes to multiple ENDF energies according to its resolution-weighted probability.
 
@@ -337,12 +362,41 @@ This introduces cross-bin correlations in the MC samples that reflect energy res
 | `GENERATE_SAMPLES_ENDF` | bool | False | Write individual MC sample ENDF files |
 | `GENERATE_COVARIANCE` | bool | True | Write covariance matrix files (.npy, .csv) |
 | `GENERATE_MF34` | bool | True | Write MF34 covariance section in ENDF format |
-| `N_SAMPLES` | int | 10 | Number of Monte Carlo samples to generate |
+| `N_SAMPLES` | int | 25 | Number of Monte Carlo samples to generate |
 
 **When to change:**
 - Set `GENERATE_SAMPLES_ENDF = True` for TMC (Total Monte Carlo) applications
-- Increase `N_SAMPLES` to 500-1000 for production; use 10-50 for development
+- Increase `N_SAMPLES` to 500-1000 for production; use 25-50 for development
 - Disable `GENERATE_MF34` if only raw covariance matrices are needed
+
+### 4.3b Multigroup Covariance Options
+
+These parameters control the adaptive multigroup collapse of fine-grid covariance matrices into broader energy groups suitable for MF34 output.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `GENERATE_MULTIGROUP_COVARIANCE` | bool | True | Enable adaptive multigroup collapse of the fine-grid covariance |
+| `MULTIGROUP_RHO_MIN` | float | 0.90 | Minimum Pearson correlation between adjacent energy points to allow merging into one group. Range 0.85-0.95 |
+| `MULTIGROUP_SIGMA_RATIO_MAX` | float | 2.0 | Maximum ratio of largest to smallest standard deviation within a group. Range 1.5-2.0 |
+| `MULTIGROUP_MIN_WIDTH_FACTOR` | float | 2.0 | Minimum group width as a multiple of the local median energy resolution $\sigma_E$. Prevents groups narrower than the physical resolution |
+| `MF34_COVARIANCE_TYPE` | str | `"both"` | Which covariance grids to write in MF34: `"fine"` (original per-ENDF-point), `"multigroup"` (collapsed groups), or `"both"` |
+| `MULTIGROUP_VARIANCE_PERCENTILE` | float | 90.0 | Percentile of fine-grid variances within each group used for the diagonal of the multigroup covariance. 50 = median, 90 = conservative, 100 = maximum |
+
+**How multigroup collapse works:**
+
+The algorithm merges adjacent fine-grid energy points into broader groups while preserving the covariance structure. Two adjacent points are candidates for merging if:
+
+1. Their Pearson correlation $\rho_{ij} \geq$ `MULTIGROUP_RHO_MIN` — they must be highly correlated (behaving similarly under sampling)
+2. Their standard-deviation ratio $\max(\sigma_i, \sigma_j) / \min(\sigma_i, \sigma_j) \leq$ `MULTIGROUP_SIGMA_RATIO_MAX` — uncertainties must be comparable
+3. The resulting group width $\geq$ `MULTIGROUP_MIN_WIDTH_FACTOR` $\times$ median($\sigma_E$) — the group must not be narrower than the experimental resolution
+
+The `MULTIGROUP_VARIANCE_PERCENTILE` controls how the diagonal (variance) of the collapsed matrix is computed. A value of 90 means the group variance is set to the 90th percentile of fine-grid variances within that group, which is conservative without being driven by outliers.
+
+**When to change:**
+- Lower `MULTIGROUP_RHO_MIN` to 0.85 for coarser grouping (fewer groups)
+- Raise to 0.95 for finer grouping that only merges very similar points
+- Set `MF34_COVARIANCE_TYPE = "fine"` to skip multigroup output entirely
+- Increase `MULTIGROUP_VARIANCE_PERCENTILE` to 100 for the most conservative variance estimates
 
 ### 4.4 General Parameters (All Methods)
 
@@ -361,10 +415,46 @@ This introduces cross-bin correlations in the MC samples that reflect energy res
 | `N_PROCS` | int | 5 | Number of parallel processes (1 = sequential) |
 | `BASE_SEED` | int | 42 | Random seed for reproducibility |
 
-**Degree Selection Methods:**
-- `"aicc"`: Corrected Akaike Information Criterion (preferred for small samples)
-- `"bic"`: Bayesian Information Criterion (more conservative, prefers simpler models)
-- `None`: Use `MAX_LEGENDRE_DEGREE` fixed for all fits
+**Degree Selection Methods (`SELECT_DEGREE`):**
+
+Information criteria balance goodness-of-fit against model complexity to prevent overfitting. Both AICc and BIC are computed for each candidate degree $k$ and the degree with the lowest value is selected.
+
+- **AICc** (corrected Akaike Information Criterion):
+
+$$
+\text{AIC} = n \ln(\text{RSS}/n) + 2k, \quad \text{AICc} = \text{AIC} + \frac{2k(k+1)}{n - k - 1}
+$$
+
+The correction term $2k(k+1)/(n-k-1)$ is critical when $n/k < 40$, which is common for angular distributions with few data points. Without the correction, AIC tends to select overly complex models in small samples.
+
+- **BIC** (Bayesian Information Criterion):
+
+$$
+\text{BIC} = n \ln(\text{RSS}/n) + k \ln(n)
+$$
+
+BIC replaces the $2k$ penalty with $k\ln(n)$, which grows with sample size. For $n \geq 8$, $\ln(n) > 2$, so BIC penalizes complexity more heavily than AIC and prefers simpler models. BIC is asymptotically consistent (selects the true model order as $n \to \infty$), while AICc minimizes prediction error.
+
+- `None`: Uses `MAX_LEGENDRE_DEGREE` for all fits without model selection. Appropriate when the correct degree is known a priori or when regularization (ridge) already controls complexity.
+
+**Ridge Regularization (`RIDGE_LAMBDA`, `RIDGE_POWER`):**
+
+Ridge regularization prevents ill-conditioned Legendre fits by penalizing large coefficients, especially at high orders. The modified cost function is:
+
+$$
+\mathcal{L} = \|\mathbf{y} - \mathbf{A}\mathbf{c}\|^2 + \lambda_{\text{ridge}} \sum_\ell (\ell+1)^p \, c_\ell^2
+$$
+
+where $\lambda_{\text{ridge}}$ = `RIDGE_LAMBDA` and $p$ = `RIDGE_POWER`. The $(\ell+1)^p$ factor applies stronger shrinkage to higher-order coefficients, which are more susceptible to noise. With `RIDGE_POWER = 4`, a degree-8 coefficient receives $(9)^4 = 6561$ times more penalty than degree-0.
+
+This is distinct from Tikhonov regularization used in `global_convolution`, which penalizes roughness (second-differences across energy) rather than coefficient magnitude. Ridge regularization operates within a single energy point's fit; Tikhonov operates across energy points.
+
+**Degrees of Freedom (`DF_METHOD`):**
+
+The effective degrees of freedom affect AICc and BIC calculations:
+
+- `"hat"`: Uses $\text{df} = \text{trace}(\mathbf{H})$ where $\mathbf{H} = \mathbf{A}(\mathbf{A}^T\mathbf{W}\mathbf{A} + \boldsymbol{\Lambda})^{-1}\mathbf{A}^T\mathbf{W}$ is the hat matrix. When ridge regularization is active, $\text{df}_{\text{hat}} < k$ because regularization effectively reduces the number of free parameters. This gives more accurate AICc/BIC values for regularized fits.
+- `"naive"`: Uses $\text{df} = k$ (number of parameters), ignoring the effect of regularization. Simpler but overestimates complexity for regularized fits.
 
 ### 4.5 Experiment Selection Method
 
@@ -377,11 +467,21 @@ This introduces cross-bin correlations in the MC samples that reflect energy res
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `EXCLUDE_EXPERIMENTS` | List[str] | `[]` | Experiments to exclude. Formats: `"20743"` (all subentries), `"20743002"`, or `"20743/002"` |
-| `MIN_RELATIVE_UNCERTAINTY` | float | 0.03 | Minimum uncertainty floor as fraction (3% = 0.03). Set to 0 to disable |
+| `MIN_RELATIVE_UNCERTAINTY` | float | 0.05 | Minimum uncertainty floor as fraction (5% = 0.05). Set to 0 to disable |
+
+**Understanding `MIN_RELATIVE_UNCERTAINTY`:**
+
+This parameter applies a floor to quoted experimental uncertainties:
+
+$$
+\sigma_{\text{eff}} = \max(\sigma_{\text{quoted}}, \text{MIN\_RELATIVE\_UNCERTAINTY} \times y)
+$$
+
+In weighted least squares, each point receives weight $w_i \sim 1/\sigma_i^2$. A measurement with unrealistically small quoted uncertainty (e.g., 0.5%) can receive 100× more weight than a measurement with 5% uncertainty, effectively letting a single experiment determine the fit. Some older experiments quote very small statistical errors without accounting for systematic contributions (detector efficiency, beam normalization, angular acceptance). The floor prevents such points from dominating.
 
 **When to change:**
 - Exclude known problematic experiments: `EXCLUDE_EXPERIMENTS = ["20743002"]`
-- Increase `MIN_RELATIVE_UNCERTAINTY` to 0.05 if fits are dominated by unrealistically small errors
+- Increase `MIN_RELATIVE_UNCERTAINTY` to 0.08 if fits are dominated by unrealistically small errors
 
 ### 4.7 TOF Energy Resolution (kernel_weights, global_convolution)
 
@@ -390,6 +490,14 @@ This introduces cross-bin correlations in the MC samples that reflect energy res
 | `DELTA_T_NS` | float | 5.0 | Default time resolution in nanoseconds |
 | `FLIGHT_PATH_M` | float | 27.037 | Default flight path in meters |
 | `N_SIGMA_CUTOFF` | float | 3.0 | Gaussian kernel cutoff (±n_sigma × $\sigma E$) |
+
+**Physical basis:** In time-of-flight experiments, neutron energy is determined from $E = \frac{1}{2}m_n v^2$ where $v = L/t$ (flight path / flight time). The energy resolution follows from error propagation:
+
+$$
+\sigma_E = \left|\frac{dE}{dt}\right| \Delta t = E \times \frac{2\Delta t}{t} = E \times \frac{2\Delta t \cdot v}{L}
+$$
+
+Since $v = \sqrt{2E/m_n}$, we get $\sigma_E \propto E^{3/2}$: higher-energy neutrons travel faster, so the same timing uncertainty $\Delta t$ maps to a larger energy spread. At 1 MeV with a 27 m flight path and 5 ns resolution, $\sigma_E \approx 5$ keV. At 3 MeV, $\sigma_E \approx 25$ keV.
 
 These are **default values** when experiment-specific TOF parameters are unavailable. The script preferentially uses:
 1. Experiment-specific values from JSON files (`method.energy_resolution_input`)
@@ -413,6 +521,22 @@ where $v = c\sqrt{2E/m_n}$ is the neutron velocity.
 | `SKIP_C0_REGULARIZATION` | bool | True | Don't apply smoothing penalty to $c_0$ |
 | `MIN_WEIGHT_SUM_THRESHOLD` | float | 0.95 | Warn if weight_sum < this; skip if < 0.5 |
 | `GLOBAL_CONV_SHAPE_ONLY` | bool | True | Enable two-pass shape-only fitting |
+
+**Understanding `SKIP_C0_REGULARIZATION`:**
+
+The coefficient $c_0$ is special: it is proportional to the angle-integrated cross section ($\sigma_{\text{total}} / 4\pi$). Unlike higher-order coefficients that describe angular shape, $c_0$ can genuinely vary rapidly with energy due to resonance structure. The Tikhonov regularization term for $c_0$ would be:
+
+$$
+R_{c_0} = \lambda \sum_k \left(c_0(E_{k+1}) - 2c_0(E_k) + c_0(E_{k-1})\right)^2
+$$
+
+This second-difference penalty suppresses rapid variation, which would artificially smooth out real resonance structure in the total cross section. Setting `SKIP_C0_REGULARIZATION = True` removes this penalty for $\ell = 0$ while keeping it for $\ell \geq 1$, where smooth energy dependence is a more reasonable prior.
+
+**Understanding `GLOBAL_CONV_SHAPE_ONLY` / `FREEZE_C0`:**
+
+The angular distribution can be written as $\sigma(\mu) = c_0 \left(1 + \sum_{\ell \geq 1} a_\ell P_\ell(\mu)\right)$ where $a_\ell = c_\ell / c_0$ are shape ratios. Different experiments may have different absolute normalizations but agree on the angular shape. Fitting all coefficients simultaneously allows normalization offsets between experiments to bias the shape coefficients.
+
+The two-pass approach (`GLOBAL_CONV_SHAPE_ONLY = True` or `FREEZE_C0 = True`) first determines $c_0$ from a full fit, then freezes it and re-fits only $c_1, c_2, \ldots$. This lets shape coefficients be determined without normalization bias.
 
 **Choosing `GLOBAL_CONV_LAMBDA`:**
 
@@ -441,7 +565,7 @@ $$
 N_{\text{eff}} = \frac{\left(\sum w_i\right)^2}{\sum w_i^2}
 $$
 
-A low $N_{\text{eff}}$ indicates that a few experiments dominate the fit.
+When all experiments have equal weight, $N_{\text{eff}} = N_{\text{experiments}}$. If one experiment has much higher weight (e.g., due to smaller quoted uncertainties or more data points), $N_{\text{eff}}$ drops toward 1, indicating the fit is essentially determined by a single dataset. The threshold `N_EFF_WARNING_THRESHOLD` (default 5.0) flags cases where the effective diversity of contributing experiments is low, which increases the risk of systematic bias from a single measurement.
 
 ### 4.10 Angular-Band Discrepancy (kernel_weights, energy_bin)
 
@@ -451,13 +575,35 @@ A low $N_{\text{eff}}$ indicates that a few experiments dominate the fit.
 | `MIN_POINTS_PER_BAND` | int | 3 | Minimum points to estimate $\tau$ per band |
 | `MAX_TAU_FRACTION` | float | 0.25 | Cap $\tau_b$ at this fraction of cross section |
 | `TAU_SMOOTHING_WINDOW` | int | 3 | Moving median window for $\tau(E)$ smoothing |
+| `TAU_PRIOR_FLOOR` | bool | True | Apply a prior floor to $\tau_b$ estimates based on well-estimated values from other energy bins |
+| `TAU_PRIOR_MIN_EXPERIMENTS` | int | 2 | Minimum number of experiments in a bin for its $\tau$ to count as "well-estimated" |
+| `TAU_PRIOR_PERCENTILE` | int | 50 | Percentile of well-estimated $\tau$ values used as the floor (50 = median) |
 | `RESCALE_UNC_BY_CHI2` | bool | True | When band discrepancy is disabled, apply Birge scaling (multiply uncertainties by √χ²_red) to account for model-data discrepancy. Ignored when `USE_BAND_DISCREPANCY=True` |
 | `ALLOW_SHRINK_UNC` | bool | False | When Birge scaling is applied and χ²_red < 1, allow uncertainties to shrink. When False (default), scaling factor is capped at 1.0 to prevent underestimation of errors |
 
-**Angular Bands:**
-- Forward: $\mu > 0.5$ ($\theta < 60°$)
-- Mid: $|\mu| \leq 0.5$ ($60° \leq \theta \leq 120°$)
-- Backward: $\mu < -0.5$ ($\theta > 120°$)
+**Physical motivation:**
+
+When multiple experiments measure the same angular distribution but disagree beyond their quoted uncertainties, this indicates unaccounted systematic errors. Rather than inflating all uncertainties globally, the band approach estimates the discrepancy separately in three angular regions because different systematic effects dominate in different angular ranges:
+
+- **Forward** ($\mu > 0.5$, $\theta < 60°$): Dominated by Coulomb/nuclear interference; sensitive to detector solid-angle corrections
+- **Mid** ($|\mu| \leq 0.5$, $60° \leq \theta \leq 120°$): Often most reliable; less affected by forward-peaking or back-angle scattering systematics
+- **Backward** ($\mu < -0.5$, $\theta > 120°$): Sensitive to compound-nuclear contributions and multiple scattering corrections
+
+The discrepancy $\tau_b$ is estimated using a robust (MAD-based) scale of the normalized residuals. When experiments agree within their uncertainties, $\tau_b = 0$. When they disagree, the effective uncertainty is inflated: $\sigma_{\text{eff},i}^2 = \sigma_i^2 + \tau_b^2$. See Section 10.2 for the full equations.
+
+**Tau Prior Floor (`TAU_PRIOR_FLOOR`):**
+
+At energy bins with only a single experiment, the inter-experiment discrepancy $\tau_b$ cannot be estimated (there is no disagreement to detect). Setting `TAU_PRIOR_FLOOR = True` applies a floor derived from bins where $\tau$ can be reliably estimated (those with $\geq$ `TAU_PRIOR_MIN_EXPERIMENTS` experiments). The floor is the `TAU_PRIOR_PERCENTILE`-th percentile of those well-estimated $\tau$ values (default: median). This prevents single-experiment bins from having artificially small uncertainties.
+
+**Birge Scaling (`RESCALE_UNC_BY_CHI2`):**
+
+When band discrepancy is disabled, Birge scaling provides a simpler alternative:
+
+$$
+\sigma_{\text{scaled}} = \sigma_{\text{original}} \times \max\left(1, \sqrt{\chi^2_{\text{red}}}\right)
+$$
+
+When $\chi^2_{\text{red}} > 1$, the data scatter exceeds what the uncertainties predict, suggesting underestimated errors. Birge scaling inflates all uncertainties uniformly to make $\chi^2_{\text{red}} = 1$. Setting `ALLOW_SHRINK_UNC = False` enforces the $\max(1, \ldots)$ to prevent deflating errors when $\chi^2_{\text{red}} < 1$ (which can happen by chance or when the model is over-parameterized).
 
 ### 4.11 Per-Experiment Normalization (kernel_weights, energy_bin)
 
@@ -465,6 +611,18 @@ A low $N_{\text{eff}}$ indicates that a few experiments dominate the fit.
 |-----------|------|---------|-------------|
 | `NORMALIZATION_SIGMA` | float | 0.05 | Per-experiment normalization uncertainty (5%) |
 | `NORM_DIST` | str | `"lognormal"` | Distribution: `"lognormal"` (always positive) or `"normal"` |
+
+**Physical motivation:**
+
+Different experiments have systematic normalization offsets arising from detector efficiency calibration, beam intensity measurement, target thickness determination, and solid angle uncertainties. These are correlated within each experiment (all angles shift together) but independent between experiments.
+
+In MC sampling, each experiment $k$ receives a random normalization factor:
+
+$$
+f_k \sim \text{LogNormal}\left(-\frac{\sigma_n^2}{2}, \sigma_n\right) \quad \text{with } E[f_k] = 1
+$$
+
+The log-shift $-\sigma_n^2/2$ ensures unit mean. All data from experiment $k$ are then scaled: $y'_i = f_k \times y_i$. This propagates normalization uncertainty into the MC samples, producing wider coefficient distributions that reflect the true state of knowledge.
 
 **When to change:**
 - Increase `NORMALIZATION_SIGMA` to 0.10 if experiments show large systematic offsets
@@ -478,7 +636,17 @@ A low $N_{\text{eff}}$ indicates that a few experiments dominate the fit.
 | `MIN_DEGREE_FOR_AVERAGING` | int | 1 | Minimum degree to include in averaging |
 | `USE_DEGREE_SAMPLING_IN_MC` | bool | True | Sample degree from weight distribution in MC |
 
-When enabled, final coefficients are a weighted average over polynomial orders based on AICc.
+**Bayesian Model Averaging:**
+
+Instead of selecting a single best Legendre degree and discarding all alternatives, model averaging computes a weighted combination:
+
+$$
+\mathbf{c}_{\text{avg}} = \sum_d w_d \, \mathbf{c}_d, \quad w_d = \frac{\exp(-\frac{1}{2}\Delta\text{AICc}_d)}{\sum_{d'} \exp(-\frac{1}{2}\Delta\text{AICc}_{d'})}
+$$
+
+where $\Delta\text{AICc}_d = \text{AICc}_d - \min(\text{AICc})$. Each degree gets a weight based on its relative AICc score. A degree with $\Delta\text{AICc} = 0$ (the best) gets the highest weight, while a degree with $\Delta\text{AICc} = 10$ gets weight $\approx 0.007$ relative to the best.
+
+This accounts for model selection uncertainty: when two degrees have similar AICc scores, neither should be chosen definitively. When `USE_DEGREE_SAMPLING_IN_MC = True`, each MC sample draws its degree from the weight distribution, introducing model selection uncertainty into the sampled coefficients.
 
 ### 4.13 Energy Bin Specific (energy_bin only)
 
@@ -542,6 +710,17 @@ This matrix shows which parameters apply to which experiment selection methods.
 | `TOF_PARAMETERS_FILE` | - | - | ✓ |
 | `JITTER_N_SIGMA_CLIP` | - | - | ✓ |
 | `TRACK_BIN_JUMPS` | - | - | ✓ |
+| **Section 4.3b (Multigroup)** | | | |
+| `GENERATE_MULTIGROUP_COVARIANCE` | ✓ | ✓ | ✓ |
+| `MULTIGROUP_RHO_MIN` | ✓ | ✓ | ✓ |
+| `MULTIGROUP_SIGMA_RATIO_MAX` | ✓ | ✓ | ✓ |
+| `MULTIGROUP_MIN_WIDTH_FACTOR` | ✓ | ✓ | ✓ |
+| `MF34_COVARIANCE_TYPE` | ✓ | ✓ | ✓ |
+| `MULTIGROUP_VARIANCE_PERCENTILE` | ✓ | ✓ | ✓ |
+| **Tau Prior Floor** | | | |
+| `TAU_PRIOR_FLOOR` | - | ✓ | ✓ |
+| `TAU_PRIOR_MIN_EXPERIMENTS` | - | ✓ | ✓ |
+| `TAU_PRIOR_PERCENTILE` | - | ✓ | ✓ |
 
 ---
 
@@ -551,8 +730,8 @@ This matrix shows which parameters apply to which experiment selection methods.
 
 ```
                     ┌─────────────────────────────┐
-                    │ Do you need production-     │
-                    │ quality results?            │
+                    │ Is data sparse or energy    │
+                    │ resolution critical?        │
                     └──────────────┬──────────────┘
                                    │
                     ┌──────────────┴──────────────┐
@@ -561,17 +740,18 @@ This matrix shows which parameters apply to which experiment selection methods.
                     │                             │
                     ▼                             ▼
          ┌──────────────────┐         ┌──────────────────┐
-         │ global_convolution│         │ Is speed critical?│
-         │ (RECOMMENDED)     │         └────────┬─────────┘
-         └──────────────────┘                   │
+         │ global_convolution│         │ Need detailed    │
+         │ (regularized)     │         │ diagnostics?     │
+         └──────────────────┘         └────────┬─────────┘
+                                                │
                                    ┌────────────┴────────────┐
                                    │                         │
-                                  YES                       NO
+                                   NO                       YES
                                    │                         │
                                    ▼                         ▼
                         ┌──────────────────┐     ┌──────────────────┐
                         │ energy_bin       │     │ kernel_weights   │
-                        │ (fastest)        │     │ (debugging)      │
+                        │ (default)        │     │ (debugging)      │
                         └──────────────────┘     └──────────────────┘
 ```
 
@@ -590,10 +770,10 @@ This matrix shows which parameters apply to which experiment selection methods.
 
 | Symptom | Solution |
 |---------|----------|
-| $\chi^2_{\text{red}} \gg 1$ | Increase `MIN_RELATIVE_UNCERTAINTY` (0.03 → 0.05) |
+| $\chi^2_{\text{red}} \gg 1$ | Increase `MIN_RELATIVE_UNCERTAINTY` (0.05 → 0.08) |
 | Single experiment dominates | Reduce `MAX_EXPERIMENT_WEIGHT_FRACTION` (0.5 → 0.3) |
 | Band discrepancy inactive | Verify `USE_BAND_DISCREPANCY = True` |
-| | Reduce `MIN_POINTS_PER_BAND` (6 → 3) |
+| | Reduce `MIN_POINTS_PER_BAND` if needed (default 3) |
 
 #### Problem: Uncertainties seem too large
 
@@ -676,7 +856,7 @@ MT_NUMBER = 2
 ENERGY_MIN_MEV = 1.0
 ENERGY_MAX_MEV = 3.0
 
-# Method (recommended for production)
+# Method (global_convolution for resolution-aware fitting)
 EXPERIMENT_SELECTION_METHOD = "global_convolution"
 GLOBAL_CONV_LAMBDA = 0.001
 L_DEPENDENT_POWER = 2.0
@@ -690,7 +870,7 @@ SELECT_DEGREE = "aicc"
 RIDGE_LAMBDA = 1e-6
 
 # Uncertainty handling
-MIN_RELATIVE_UNCERTAINTY = 0.03
+MIN_RELATIVE_UNCERTAINTY = 0.05
 USE_BAND_DISCREPANCY = True
 
 # Output options

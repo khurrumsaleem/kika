@@ -49,7 +49,7 @@ from kika.endf.classes.mf4.mixed import MF4MTMixed
 from kika.exfor import read_all_exfor
 
 # Import kika modules - MF34 from library (replaces local implementation)
-from kika.endf.writers import create_mf34_from_covariance, write_mf34_to_file
+from kika.endf.writers import create_mf34_from_covariance, write_mf34_to_file, merge_mf34
 
 # Import local utility module (uses relative import from scripts package)
 from scripts.exfor_utils import (
@@ -80,7 +80,7 @@ from scripts.exfor_utils import (
     save_all_legendre_coefficients,
     # ENDF writing
     write_nominal_endf,
-    write_evaluation_endf,
+    write_average_endf,
     write_endf_samples_batch,
     write_endf_sample,
     _write_sample_wrapper,
@@ -106,6 +106,7 @@ from scripts.resample_AD import (
     endf_normalize_legendre_coeffs,
     compute_angular_band_discrepancy,
     smooth_tau_in_energy,
+    apply_tau_prior_floor,
     compute_n_eff,
     fit_legendre_global_convolution,
     build_global_convolution_system,
@@ -244,8 +245,8 @@ EXCLUDE_EXPERIMENTS = ["20743002", "32246002"]
 
 
 # Minimum relative uncertainty floor (prevents unrealistically small errors from dominating)
-# Set to 0.0 to disable. e.g., 0.03 for 3% minimum uncertainty
-MIN_RELATIVE_UNCERTAINTY = 0.03
+# Set to 0.0 to disable. e.g., 0.05 for 5% minimum uncertainty
+MIN_RELATIVE_UNCERTAINTY = 0.05
 
 # -----------------------------------------------------------------------------
 # 6. METHOD-SPECIFIC PARAMETERS
@@ -277,6 +278,9 @@ USE_BAND_DISCREPANCY = True                      # Use band-based uncertainty (v
 MIN_POINTS_PER_BAND = 3                          # Minimum points to estimate τ_b per band
 MAX_TAU_FRACTION = 0.25                          # Cap τ_b at 25% of cross section
 TAU_SMOOTHING_WINDOW = 3                         # Moving median window for τ_b(E) smoothing
+TAU_PRIOR_FLOOR = True                           # Apply tau prior floor from multi-experiment bins
+TAU_PRIOR_MIN_EXPERIMENTS = 2                    # Min experiments to count as "well-estimated"
+TAU_PRIOR_PERCENTILE = 50                        # Percentile of well-estimated tau for baseline
 RESCALE_UNC_BY_CHI2 = True                       # Apply Birge scaling when band discrepancy disabled
 ALLOW_SHRINK_UNC = False                         # Allow uncertainties to shrink (chi2_red < 1)
 
@@ -307,6 +311,135 @@ TRACK_BIN_JUMPS = True                           # Track bin jump statistics for
 
 # Global logger reference (set by _set_logger from exfor_utils)
 _logger = None
+
+
+# =============================================================================
+# PARALLEL MC HELPER (top-level for pickling)
+# =============================================================================
+
+def _mc_one_bin(args):
+    """
+    Run MC sampling for a single energy bin (top-level for Pool.map pickling).
+
+    Returns
+    -------
+    tuple
+        (energy_idx, is_interpolated, results_by_sample, success)
+        where results_by_sample is Dict[s_idx, np.ndarray] of ENDF coefficients.
+    """
+    (
+        nr_energy_idx,
+        nr_frozen_degree,
+        nr_nominal_coeffs,
+        nr_interpolated,
+        nr_mc_df,
+        nr_mc_weights,
+        nr_degree_weights,
+        n_samples,
+        base_seed,
+        max_degree,
+        ridge_lambda,
+        ridge_power,
+        df_method,
+        use_band_discrepancy,
+        min_points_per_band,
+        max_tau_fraction,
+        use_degree_sampling_in_mc,
+        rescale_unc_by_chi2,
+        allow_shrink_unc,
+        freeze_c0,
+        normalization_sigma,
+        norm_dist,
+    ) = args
+
+    energy_idx = nr_energy_idx
+
+    if nr_interpolated:
+        endf_coeffs = endf_normalize_legendre_coeffs(nr_nominal_coeffs, include_a0=False)
+        results = {s_idx: endf_coeffs for s_idx in range(n_samples)}
+        return (energy_idx, True, results, True)
+
+    bin_seed = base_seed + energy_idx
+    rng = np.random.default_rng(bin_seed)
+    mc_weights = nr_mc_weights
+
+    use_degree_sampling = (
+        use_degree_sampling_in_mc and
+        nr_degree_weights is not None and
+        len(nr_degree_weights) > 1
+    )
+
+    results = {}
+    try:
+        if use_degree_sampling:
+            degrees = list(nr_degree_weights.keys())
+            probs = np.array(list(nr_degree_weights.values()))
+            probs = probs / probs.sum()
+
+            for s_idx in range(n_samples):
+                sample_degree = rng.choice(degrees, p=probs)
+                coef_df_single, _ = sample_legendre_coefficients(
+                    nr_mc_df,
+                    value_col="value",
+                    unc_col="unc",
+                    degree=sample_degree,
+                    max_degree=max_degree,
+                    select_degree=None,
+                    ridge_lambda=ridge_lambda,
+                    ridge_power=ridge_power,
+                    df_method=df_method,
+                    external_weights=mc_weights if len(mc_weights) > 0 else None,
+                    n_samples=1,
+                    stochastic=True,
+                    rescale_unc_by_chi2=rescale_unc_by_chi2,
+                    allow_shrink_unc=allow_shrink_unc,
+                    random_state=bin_seed + s_idx,
+                    use_band_discrepancy=use_band_discrepancy,
+                    min_points_per_band=min_points_per_band,
+                    max_tau_fraction=max_tau_fraction,
+                    freeze_c0=freeze_c0,
+                    sigma_norm=normalization_sigma,
+                    norm_dist=norm_dist,
+                )
+                sample_coeffs = coef_df_single.iloc[0].to_numpy()
+                if len(sample_coeffs) < max_degree + 1:
+                    sample_coeffs = np.pad(sample_coeffs, (0, max_degree + 1 - len(sample_coeffs)))
+                endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
+                results[s_idx] = endf_coeffs
+        else:
+            coef_df, _ = sample_legendre_coefficients(
+                nr_mc_df,
+                value_col="value",
+                unc_col="unc",
+                degree=nr_frozen_degree,
+                max_degree=max_degree,
+                select_degree=None,
+                ridge_lambda=ridge_lambda,
+                ridge_power=ridge_power,
+                df_method=df_method,
+                external_weights=mc_weights if len(mc_weights) > 0 else None,
+                n_samples=n_samples,
+                rescale_unc_by_chi2=rescale_unc_by_chi2,
+                allow_shrink_unc=allow_shrink_unc,
+                random_state=bin_seed,
+                use_band_discrepancy=use_band_discrepancy,
+                min_points_per_band=min_points_per_band,
+                max_tau_fraction=max_tau_fraction,
+                freeze_c0=freeze_c0,
+                sigma_norm=normalization_sigma,
+                norm_dist=norm_dist,
+            )
+            for s_idx in range(n_samples):
+                sample_coeffs = coef_df.iloc[s_idx].to_numpy()
+                endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
+                results[s_idx] = endf_coeffs
+
+        return (energy_idx, False, results, True)
+
+    except Exception:
+        endf_coeffs = endf_normalize_legendre_coeffs(nr_nominal_coeffs, include_a0=False)
+        results = {s_idx: endf_coeffs for s_idx in range(n_samples)}
+        return (energy_idx, False, results, False)
 
 
 # =============================================================================
@@ -619,6 +752,9 @@ def perform_nominal_fits(
     shape_only: bool = False,
     exclude_experiments: Optional[List[str]] = None,
     min_relative_uncertainty: float = 0.0,
+    tau_prior_floor: bool = True,
+    tau_prior_min_experiments: int = 2,
+    tau_prior_percentile: float = 50.0,
     logger = None,
 ) -> Tuple[List[NominalFitResult], Optional[GlobalConvolutionSystem], Optional[Dict[int, float]]]:
     """Phase 1: Perform nominal fits to determine frozen orders and band discrepancies.
@@ -982,6 +1118,16 @@ def perform_nominal_fits(
                 if r.has_data and r.energy_mev in smoothed_tau:
                     r.tau_info = smoothed_tau[r.energy_mev]
 
+    if tau_prior_floor and use_band_discrepancy:
+        baselines = apply_tau_prior_floor(
+            results,
+            min_experiments=tau_prior_min_experiments,
+            percentile=tau_prior_percentile,
+        )
+        if logger:
+            logger.info(f"  Tau prior floor baselines: τ_F={baselines['tau_F']:.4f}, "
+                        f"τ_M={baselines['tau_M']:.4f}, τ_B={baselines['tau_B']:.4f}")
+
     return results, None, None  # No global_system or c0_frozen for per-energy methods
 
 
@@ -1118,6 +1264,9 @@ def run_exfor_to_endf_sampling_v2(
     min_points_per_band: int = 3,
     max_tau_fraction: float = 0.25,
     tau_smoothing_window: int = 3,
+    tau_prior_floor: bool = True,
+    tau_prior_min_experiments: int = 2,
+    tau_prior_percentile: float = 50.0,
     sigma_norm: float = 0.05,
     use_model_averaging: bool = True,
     min_degree_for_averaging: int = 3,
@@ -1201,67 +1350,160 @@ def run_exfor_to_endf_sampling_v2(
     print(f"[INFO] Starting EXFOR-to-ENDF sampling (v2)")
     print(f"[INFO] Log file: {log_file}")
 
-    # Log comprehensive methodology
-    _logger.info("[METHODOLOGY]")
-    _logger.info("")
-    _logger.info("  API Version:")
-    _logger.info("    - EXFOR Loading: kika.exfor.read_all_exfor (NEW)")
-    _logger.info("    - Frame transforms: kika.exfor.transforms")
-    _logger.info("    - MF34 creation: kika.endf.writers.create_mf34_from_covariance (NEW)")
+    # ── [RUN PARAMETERS] ─────────────────────────────────────────────────────
+    _logger.info("[RUN PARAMETERS]")
     _logger.info("")
 
-    # Experiment selection method documentation
-    _logger.info("  Experiment Selection Method:")
-    if experiment_selection_method == "global_convolution":
-        _logger.info("    - Method: GLOBAL CONVOLUTION (Tikhonov regularization)")
-        _logger.info("      Fits ALL energy points simultaneously using a global optimization")
-        _logger.info("      that properly accounts for energy resolution smearing.")
-        _logger.info(f"    - Tikhonov λ: {tikhonov_lambda}")
-        _logger.info(f"    - Energy kernel: Gaussian with σE from TOF resolution")
-    elif experiment_selection_method == "kernel_weights":
-        _logger.info("    - Method: KERNEL WEIGHTS (Gaussian weighting)")
-        _logger.info("      Each ENDF energy fitted independently with EXFOR points weighted")
-        _logger.info("      by Gaussian kernel: g_ij = exp(-0.5 * ((E_i - E_j)/σE)²)")
-        _logger.info(f"    - Kernel cutoff: ±{n_sigma_cutoff}σ")
-        _logger.info(f"    - Min weight fraction: {min_kernel_weight_fraction}")
-        _logger.info(f"    - Max experiment weight fraction: {max_experiment_weight_fraction}")
-    else:  # energy_bin
-        _logger.info("    - Method: ENERGY BIN MATCHING")
-        _logger.info("      Experiments selected if their energy falls within bin boundaries.")
-        _logger.info("      Bin boundaries: midpoints between ENDF grid energies.")
-        _logger.info("      Weights: uniform (all points within bin get weight = 1.0)")
+    # -- General: Paths --
+    _logger.info("  Paths:")
+    _logger.info(f"    ENDF_FILE              = {endf_file}")
+    _logger.info(f"    EXFOR_DIRECTORY         = {exfor_directory}")
+    _logger.info(f"    EXFOR_DB_PATH           = {exfor_db_path}")
+    _logger.info(f"    OUTPUT_DIR              = {output_dir}")
     _logger.info("")
 
-    # TOF resolution parameters
+    # -- General: Data source --
+    _logger.info("  Data Source:")
+    _logger.info(f"    EXFOR_SOURCE            = {exfor_source}")
+    _logger.info(f"    TARGET_ZAIDS            = {target_zaid}")
+    _logger.info(f"    TARGET_PROJECTILE       = {target_projectile}")
+    _logger.info(f"    SUPPLEMENTARY_JSON_FILES = {supplementary_json_files}")
+    _logger.info("")
+
+    # -- General: Physics --
+    _logger.info("  Energy Range & Physics:")
+    _logger.info(f"    ENERGY_MIN_MEV          = {energy_min_mev}")
+    _logger.info(f"    ENERGY_MAX_MEV          = {energy_max_mev}")
+    _logger.info(f"    MT_NUMBER               = {mt_number}")
+    _logger.info(f"    M_PROJ_U                = {m_proj_u}")
+    _logger.info(f"    M_TARG_U                = {m_targ_u}")
+    _logger.info("")
+
+    # -- General: Legendre fitting --
+    _logger.info("  Legendre Fitting:")
+    _logger.info(f"    MAX_LEGENDRE_DEGREE     = {max_degree}")
+    _logger.info(f"    SELECT_DEGREE           = {select_degree if select_degree else 'None (use max)'}")
+    _logger.info(f"    RIDGE_LAMBDA            = {ridge_lambda}")
+    _logger.info(f"    RIDGE_POWER             = {RIDGE_POWER}")
+    _logger.info(f"    DF_METHOD               = {DF_METHOD}")
+    _logger.info("")
+
+    # -- General: Output flags --
+    _logger.info("  Output Flags:")
+    _logger.info(f"    GENERATE_NOMINAL_ENDF   = {generate_nominal_endf}")
+    _logger.info(f"    GENERATE_MC_MEAN_ENDF   = {generate_mc_mean_endf}")
+    _logger.info(f"    GENERATE_SAMPLES_ENDF   = {generate_samples_endf}")
+    _logger.info(f"    GENERATE_COVARIANCE     = {generate_covariance}")
+    _logger.info(f"    GENERATE_MF34           = {generate_mf34}")
+    _logger.info(f"    N_SAMPLES               = {n_samples}")
+    _logger.info("")
+
+    # -- General: Processing --
+    _logger.info("  Processing:")
+    _logger.info(f"    N_PROCS                 = {n_procs}")
+    _logger.info(f"    BASE_SEED               = {base_seed}")
+    _logger.info("")
+
+    # -- General: Exclusions --
+    _logger.info("  Exclusions & Uncertainty:")
+    _logger.info(f"    EXCLUDE_EXPERIMENTS     = {exclude_experiments if exclude_experiments else 'None'}")
+    _logger.info(f"    MIN_RELATIVE_UNCERTAINTY = {min_relative_uncertainty} ({min_relative_uncertainty*100:.1f}%)")
+    _logger.info("")
+
+    # -- Multigroup Covariance (only if enabled) --
+    if generate_multigroup_covariance:
+        _logger.info("  Multigroup Covariance:")
+        _logger.info(f"    GENERATE_MULTIGROUP_COVARIANCE = {generate_multigroup_covariance}")
+        _logger.info(f"    MULTIGROUP_RHO_MIN             = {multigroup_rho_min}")
+        _logger.info(f"    MULTIGROUP_SIGMA_RATIO_MAX     = {multigroup_sigma_ratio_max}")
+        _logger.info(f"    MULTIGROUP_MIN_WIDTH_FACTOR    = {multigroup_min_width_factor}")
+        _logger.info(f"    MF34_COVARIANCE_TYPE           = {mf34_covariance_type}")
+        _logger.info(f"    MULTIGROUP_VARIANCE_PERCENTILE = {multigroup_variance_percentile}")
+        _logger.info("")
+
+    # -- Experiment Selection Method --
+    _logger.info(f"  EXPERIMENT_SELECTION_METHOD = {experiment_selection_method}")
+    _logger.info("")
+
+    # -- 6a. TOF Resolution (kernel_weights, global_convolution) --
     if experiment_selection_method in ("kernel_weights", "global_convolution"):
-        _logger.info("  TOF Energy Resolution Parameters:")
-        _logger.info(f"    - Time resolution (Δt): {delta_t_ns} ns")
-        _logger.info(f"    - Flight path (L): {flight_path_m} m")
-        _logger.info(f"    - σE calculation: σE = 2E × (Δt/t) where t = L/v")
+        _logger.info("  TOF Energy Resolution (6a):")
+        _logger.info(f"    DELTA_T_NS              = {delta_t_ns}")
+        _logger.info(f"    FLIGHT_PATH_M           = {flight_path_m}")
+        _logger.info(f"    N_SIGMA_CUTOFF          = {n_sigma_cutoff}")
         _logger.info("")
 
-    # Angular-band discrepancy model
-    if use_band_discrepancy:
-        _logger.info("  Angular-Band Discrepancy Model:")
-        _logger.info("    Used to account for systematic differences between experiments")
-        _logger.info("    that vary with scattering angle region:")
-        _logger.info("    - Forward band (τ_F):  μ > 0.5  (θ < 60°)")
-        _logger.info("    - Mid band (τ_M):      |μ| ≤ 0.5 (60° ≤ θ ≤ 120°)")
-        _logger.info("    - Backward band (τ_B): μ < -0.5 (θ > 120°)")
-        _logger.info(f"    - Min points per band: {min_points_per_band}")
-        _logger.info(f"    - Max τ fraction: {max_tau_fraction} (25% cap)")
-        _logger.info(f"    - τ smoothing window: {tau_smoothing_window} energy bins")
+    # -- 6b. Global Convolution (global_convolution only) --
+    if experiment_selection_method == "global_convolution":
+        _logger.info("  Global Convolution (6b):")
+        _logger.info(f"    GLOBAL_CONV_LAMBDA      = {tikhonov_lambda}")
+        _logger.info(f"    L_DEPENDENT_POWER       = {L_DEPENDENT_POWER}")
+        _logger.info(f"    SKIP_C0_REGULARIZATION  = {SKIP_C0_REGULARIZATION}")
+        _logger.info(f"    MIN_WEIGHT_SUM_THRESHOLD = {MIN_WEIGHT_SUM_THRESHOLD}")
+        _logger.info(f"    GLOBAL_CONV_SHAPE_ONLY  = {GLOBAL_CONV_SHAPE_ONLY}")
         _logger.info("")
 
-    # Legendre fitting
-    _logger.info("  Legendre Polynomial Fitting:")
-    _logger.info(f"    - Maximum degree: {max_degree}")
-    _logger.info(f"    - Degree selection: {select_degree if select_degree else 'fixed (use max)'}")
-    _logger.info(f"    - Ridge regularization λ: {ridge_lambda}")
-    if use_model_averaging:
-        _logger.info(f"    - Model averaging: enabled (min degree: {min_degree_for_averaging})")
-    else:
-        _logger.info("    - Model averaging: disabled")
+    # -- 6c. Kernel Weight Control (kernel_weights only) --
+    if experiment_selection_method == "kernel_weights":
+        _logger.info("  Kernel Weight Control (6c):")
+        _logger.info(f"    MIN_KERNEL_WEIGHT_FRACTION     = {min_kernel_weight_fraction}")
+        _logger.info(f"    MAX_EXPERIMENT_WEIGHT_FRACTION  = {max_experiment_weight_fraction}")
+        _logger.info(f"    N_EFF_WARNING_THRESHOLD        = {n_eff_warning_threshold}")
+        _logger.info(f"    WEIGHT_SPAN_WARNING_RATIO      = {weight_span_warning_ratio}")
+        _logger.info(f"    DEDUPE_NOMINAL                 = {DEDUPE_NOMINAL}")
+        _logger.info(f"    DEDUPE_MC                      = {DEDUPE_MC}")
+        _logger.info(f"    USE_OVERLAP_WEIGHTS            = {USE_OVERLAP_WEIGHTS}")
+        _logger.info("")
+
+    # -- 6d. Angular-Band Discrepancy (kernel_weights, energy_bin) --
+    if experiment_selection_method in ("kernel_weights", "energy_bin"):
+        _logger.info("  Angular-Band Discrepancy (6d):")
+        _logger.info(f"    USE_BAND_DISCREPANCY           = {use_band_discrepancy}")
+        _logger.info(f"    MIN_POINTS_PER_BAND            = {min_points_per_band}")
+        _logger.info(f"    MAX_TAU_FRACTION               = {max_tau_fraction}")
+        _logger.info(f"    TAU_SMOOTHING_WINDOW           = {tau_smoothing_window}")
+        _logger.info(f"    TAU_PRIOR_FLOOR                = {tau_prior_floor}")
+        if tau_prior_floor:
+            _logger.info(f"    TAU_PRIOR_MIN_EXPERIMENTS      = {tau_prior_min_experiments}")
+            _logger.info(f"    TAU_PRIOR_PERCENTILE           = {tau_prior_percentile}")
+        _logger.info(f"    RESCALE_UNC_BY_CHI2            = {RESCALE_UNC_BY_CHI2}")
+        _logger.info(f"    ALLOW_SHRINK_UNC               = {ALLOW_SHRINK_UNC}")
+        _logger.info("")
+
+    # -- 6e. Per-Experiment Normalization (kernel_weights, energy_bin) --
+    if experiment_selection_method in ("kernel_weights", "energy_bin"):
+        _logger.info("  Per-Experiment Normalization (6e):")
+        _logger.info(f"    NORMALIZATION_SIGMA             = {sigma_norm}")
+        _logger.info(f"    NORM_DIST                      = {NORM_DIST}")
+        _logger.info("")
+
+    # -- 6f. Model Averaging (kernel_weights, energy_bin) --
+    if experiment_selection_method in ("kernel_weights", "energy_bin"):
+        _logger.info("  Model Averaging (6f):")
+        _logger.info(f"    USE_MODEL_AVERAGING            = {use_model_averaging}")
+        _logger.info(f"    MIN_DEGREE_FOR_AVERAGING       = {min_degree_for_averaging}")
+        _logger.info(f"    USE_DEGREE_SAMPLING_IN_MC      = {USE_DEGREE_SAMPLING_IN_MC}")
+        _logger.info("")
+
+    # -- 6g. Energy Bin Specific (energy_bin only) --
+    if experiment_selection_method == "energy_bin":
+        _logger.info("  Energy Bin Method (6g):")
+        _logger.info(f"    NORMALIZE_BY_N_POINTS          = {NORMALIZE_BY_N_POINTS}")
+        _logger.info(f"    MAX_EXP_WEIGHT_FRAC_BIN        = {MAX_EXP_WEIGHT_FRAC_BIN}")
+        _logger.info(f"    FREEZE_C0                      = {FREEZE_C0}")
+        _logger.info("")
+
+    # -- 6h. Energy Jitter (energy_bin only) --
+    if experiment_selection_method == "energy_bin":
+        _logger.info("  Energy Jitter (6h):")
+        _logger.info(f"    USE_ENERGY_JITTER              = {USE_ENERGY_JITTER}")
+        if USE_ENERGY_JITTER:
+            _logger.info(f"    TOF_PARAMETERS_FILE            = {TOF_PARAMETERS_FILE}")
+        _logger.info(f"    JITTER_N_SIGMA_CLIP            = {JITTER_N_SIGMA_CLIP}")
+        _logger.info(f"    TRACK_BIN_JUMPS                = {TRACK_BIN_JUMPS}")
+        _logger.info("")
+
+    _logger.info(separator)
     _logger.info("")
 
     # Warning legend
@@ -1288,7 +1530,6 @@ def run_exfor_to_endf_sampling_v2(
         _logger.info("      -> Effect: Weight redistributed to prevent single-experiment bias")
         _logger.info("      -> Action: This is protective; review if capping is frequent")
         _logger.info("")
-
     _logger.info("  - 'INTERPOLATED from neighboring bins': No EXFOR data at this energy")
     _logger.info("      -> Cause: No experimental data available within energy tolerance")
     _logger.info("      -> Effect: Coefficients linearly interpolated from neighboring bins with data")
@@ -1298,27 +1539,6 @@ def run_exfor_to_endf_sampling_v2(
     _logger.info("      -> Cause: Energy bin is below/above the range of available EXFOR data")
     _logger.info("      -> Effect: Uses nearest neighbor's coefficients (no interpolation possible)")
     _logger.info("      -> Action: Expand energy range coverage or accept extrapolation uncertainty")
-    _logger.info("")
-
-    # Fixed parameters
-    _logger.info("[FIXED PARAMETERS]")
-    _logger.info(f"  ENDF file: {endf_file}")
-    _logger.info(f"  Output directory: {output_dir}")
-    _logger.info(f"  Energy range: [{energy_min_mev:.3f}, {energy_max_mev:.3f}] MeV")
-    _logger.info(f"  MT number: {mt_number}")
-    _logger.info(f"  Target mass (m_targ): {m_targ_u} u")
-    _logger.info(f"  Projectile mass (m_proj): {m_proj_u} u")
-    _logger.info(f"  MC samples: {n_samples}")
-    _logger.info(f"  Parallel processes: {n_procs}")
-    _logger.info(f"  Base seed: {base_seed}")
-    if exclude_experiments:
-        _logger.info(f"  Excluded experiments: {exclude_experiments}")
-    else:
-        _logger.info(f"  Excluded experiments: None")
-    if min_relative_uncertainty > 0:
-        _logger.info(f"  Min relative uncertainty floor: {min_relative_uncertainty*100:.1f}%")
-    else:
-        _logger.info(f"  Min relative uncertainty floor: Disabled")
     _logger.info("")
     _logger.info(separator)
 
@@ -1455,6 +1675,9 @@ def run_exfor_to_endf_sampling_v2(
         shape_only=GLOBAL_CONV_SHAPE_ONLY,
         exclude_experiments=exclude_experiments,
         min_relative_uncertainty=min_relative_uncertainty,
+        tau_prior_floor=tau_prior_floor,
+        tau_prior_min_experiments=tau_prior_min_experiments,
+        tau_prior_percentile=tau_prior_percentile,
         logger=_logger,
     )
 
@@ -1635,6 +1858,7 @@ def run_exfor_to_endf_sampling_v2(
                 norm_dist=NORM_DIST,
                 normalize_by_n_points=NORMALIZE_BY_N_POINTS,
                 max_experiment_weight_fraction=MAX_EXP_WEIGHT_FRAC_BIN,
+                n_procs=N_PROCS,
                 logger=_logger,
             )
 
@@ -1649,184 +1873,120 @@ def run_exfor_to_endf_sampling_v2(
         # If use_jitter was set to False during loading, fall through to per-bin MC
         if not use_jitter:
             # Fallback to per-bin MC if jitter loading failed
-            _logger.info(f"  Method: Per-bin independent MC (jitter fallback)")
+            _logger.warning("  " + "=" * 60)
+            _logger.warning(f"  Method: Per-bin independent MC (jitter fallback)")
+            if N_PROCS > 1:
+                _logger.info(f"  Using {N_PROCS} parallel processes over bins")
 
-            # Initialize all_samples: Dict[sample_idx, Dict[energy_idx, coeffs]]
-            all_samples = {s_idx: {} for s_idx in range(n_samples)}
-
-            n_sampled = 0
-            n_interpolated_used = 0
-
+            # Build args list for _mc_one_bin (no degree sampling in fallback)
+            bin_args_list = []
             for nr in nominal_results:
                 if not nr.has_data:
                     continue
+                mc_df = nr.exfor_df_mc if nr.exfor_df_mc is not None else nr.exfor_df
+                mc_weights = nr.kernel_weights_mc if nr.kernel_weights_mc is not None else nr.kernel_weights
+                bin_args_list.append((
+                    nr.energy_index,
+                    nr.frozen_degree,
+                    nr.nominal_coeffs,
+                    nr.interpolated,
+                    mc_df,
+                    mc_weights,
+                    None,  # no degree_weights in fallback
+                    n_samples,
+                    base_seed,
+                    max_degree,
+                    ridge_lambda,
+                    RIDGE_POWER,
+                    DF_METHOD,
+                    use_band_discrepancy,
+                    min_points_per_band,
+                    max_tau_fraction,
+                    False,  # USE_DEGREE_SAMPLING_IN_MC disabled in fallback
+                    RESCALE_UNC_BY_CHI2,
+                    ALLOW_SHRINK_UNC,
+                    FREEZE_C0,
+                    NORMALIZATION_SIGMA,
+                    NORM_DIST,
+                ))
 
-                energy_idx = nr.energy_index
+            if N_PROCS > 1:
+                with Pool(N_PROCS) as pool:
+                    bin_results = pool.map(_mc_one_bin, bin_args_list)
+            else:
+                bin_results = [_mc_one_bin(a) for a in bin_args_list]
 
-                if nr.interpolated:
-                    endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
-                    for s_idx in range(n_samples):
-                        all_samples[s_idx][energy_idx] = endf_coeffs
+            all_samples = {s_idx: {} for s_idx in range(n_samples)}
+            n_sampled = 0
+            n_interpolated_used = 0
+
+            for energy_idx, is_interpolated, results_by_sample, success in bin_results:
+                for s_idx, endf_coeffs in results_by_sample.items():
+                    all_samples[s_idx][energy_idx] = endf_coeffs
+                if is_interpolated:
                     n_interpolated_used += 1
-                else:
-                    bin_seed = base_seed + energy_idx
-                    mc_df = nr.exfor_df_mc if nr.exfor_df_mc is not None else nr.exfor_df
-                    mc_weights = nr.kernel_weights_mc if nr.kernel_weights_mc is not None else nr.kernel_weights
-
-                    try:
-                        coef_df, _ = sample_legendre_coefficients(
-                            mc_df,
-                            value_col="value",
-                            unc_col="unc",
-                            degree=nr.frozen_degree,
-                            max_degree=max_degree,
-                            select_degree=None,
-                            ridge_lambda=ridge_lambda,
-                            ridge_power=RIDGE_POWER,
-                            df_method=DF_METHOD,
-                            external_weights=mc_weights if len(mc_weights) > 0 else None,
-                            n_samples=n_samples,
-                            rescale_unc_by_chi2=RESCALE_UNC_BY_CHI2,
-                            allow_shrink_unc=ALLOW_SHRINK_UNC,
-                            random_state=bin_seed,
-                            use_band_discrepancy=use_band_discrepancy,
-                            min_points_per_band=min_points_per_band,
-                            max_tau_fraction=max_tau_fraction,
-                            freeze_c0=FREEZE_C0,
-                            sigma_norm=NORMALIZATION_SIGMA,
-                            norm_dist=NORM_DIST,
-                        )
-                        for s_idx in range(n_samples):
-                            sample_coeffs = coef_df.iloc[s_idx].to_numpy()
-                            endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
-                            all_samples[s_idx][energy_idx] = endf_coeffs
-                        n_sampled += 1
-                    except Exception as e:
-                        _logger.warning(f"  MC sampling failed for E={nr.energy_mev:.4f} MeV: {e}")
-                        endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
-                        for s_idx in range(n_samples):
-                            all_samples[s_idx][energy_idx] = endf_coeffs
+                elif success:
+                    n_sampled += 1
 
             _logger.info(f"  MC sampled: {n_sampled} bins, interpolated: {n_interpolated_used} bins")
 
     else:
         # ORIGINAL METHOD: Per-bin independent MC sampling
         _logger.info(f"  Method: Per-bin independent MC")
+        if N_PROCS > 1:
+            _logger.info(f"  Using {N_PROCS} parallel processes over bins")
 
-        # Initialize all_samples: Dict[sample_idx, Dict[energy_idx, coeffs]]
-        all_samples = {s_idx: {} for s_idx in range(n_samples)}
-
-        n_sampled = 0
-        n_interpolated_used = 0
-
+        # Build args list for _mc_one_bin
+        bin_args_list = []
         for nr in nominal_results:
             if not nr.has_data:
                 continue
+            mc_df = nr.exfor_df_mc if nr.exfor_df_mc is not None else nr.exfor_df
+            mc_weights = nr.kernel_weights_mc if nr.kernel_weights_mc is not None else nr.kernel_weights
+            bin_args_list.append((
+                nr.energy_index,
+                nr.frozen_degree,
+                nr.nominal_coeffs,
+                nr.interpolated,
+                mc_df,
+                mc_weights,
+                nr.degree_weights,
+                n_samples,
+                base_seed,
+                max_degree,
+                ridge_lambda,
+                RIDGE_POWER,
+                DF_METHOD,
+                use_band_discrepancy,
+                min_points_per_band,
+                max_tau_fraction,
+                USE_DEGREE_SAMPLING_IN_MC,
+                RESCALE_UNC_BY_CHI2,
+                ALLOW_SHRINK_UNC,
+                FREEZE_C0,
+                NORMALIZATION_SIGMA,
+                NORM_DIST,
+            ))
 
-            energy_idx = nr.energy_index
+        # Run per-bin MC (parallel or sequential)
+        if N_PROCS > 1:
+            with Pool(N_PROCS) as pool:
+                bin_results = pool.map(_mc_one_bin, bin_args_list)
+        else:
+            bin_results = [_mc_one_bin(a) for a in bin_args_list]
 
-            if nr.interpolated:
-                # Interpolated bins: use nominal coefficients for all samples
-                # (no EXFOR data to sample from)
-                endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
-                for s_idx in range(n_samples):
-                    all_samples[s_idx][energy_idx] = endf_coeffs
+        # Assemble results into all_samples
+        all_samples = {s_idx: {} for s_idx in range(n_samples)}
+        n_sampled = 0
+        n_interpolated_used = 0
+
+        for energy_idx, is_interpolated, results_by_sample, success in bin_results:
+            for s_idx, endf_coeffs in results_by_sample.items():
+                all_samples[s_idx][energy_idx] = endf_coeffs
+            if is_interpolated:
                 n_interpolated_used += 1
-            else:
-                # Bins with EXFOR data: perform actual MC sampling
-                # Use deterministic seed per energy bin for reproducibility
-                bin_seed = base_seed + energy_idx
-                rng = np.random.default_rng(bin_seed)
-
-                # Choose data source for MC (two-pass dedupe)
-                mc_df = nr.exfor_df_mc if nr.exfor_df_mc is not None else nr.exfor_df
-                mc_weights = nr.kernel_weights_mc if nr.kernel_weights_mc is not None else nr.kernel_weights
-
-                # Check if degree sampling is enabled (Improvement 2.4)
-                use_degree_sampling = (
-                    USE_DEGREE_SAMPLING_IN_MC and
-                    nr.degree_weights is not None and
-                    len(nr.degree_weights) > 1
-                )
-
-                try:
-                    if use_degree_sampling:
-                        # Per-sample fitting with degree sampling
-                        degrees = list(nr.degree_weights.keys())
-                        probs = np.array(list(nr.degree_weights.values()))
-                        probs = probs / probs.sum()
-
-                        for s_idx in range(n_samples):
-                            sample_degree = rng.choice(degrees, p=probs)
-                            coef_df_single, _ = sample_legendre_coefficients(
-                                mc_df,
-                                value_col="value",
-                                unc_col="unc",
-                                degree=sample_degree,
-                                max_degree=max_degree,
-                                select_degree=None,
-                                ridge_lambda=ridge_lambda,
-                                ridge_power=RIDGE_POWER,
-                                df_method=DF_METHOD,
-                                external_weights=mc_weights if len(mc_weights) > 0 else None,
-                                n_samples=1,
-                                rescale_unc_by_chi2=RESCALE_UNC_BY_CHI2,
-                                allow_shrink_unc=ALLOW_SHRINK_UNC,
-                                random_state=bin_seed + s_idx,
-                                use_band_discrepancy=use_band_discrepancy,
-                                min_points_per_band=min_points_per_band,
-                                max_tau_fraction=max_tau_fraction,
-                                freeze_c0=FREEZE_C0,
-                                sigma_norm=NORMALIZATION_SIGMA,
-                                norm_dist=NORM_DIST,
-                            )
-                            sample_coeffs = coef_df_single.iloc[0].to_numpy()
-                            # Pad to max_degree+1 if needed
-                            if len(sample_coeffs) < max_degree + 1:
-                                sample_coeffs = np.pad(sample_coeffs, (0, max_degree + 1 - len(sample_coeffs)))
-                            endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
-                            all_samples[s_idx][energy_idx] = endf_coeffs
-                    else:
-                        # Current batch MC behavior (frozen degree)
-                        coef_df, _ = sample_legendre_coefficients(
-                            mc_df,
-                            value_col="value",
-                            unc_col="unc",
-                            degree=nr.frozen_degree,  # Use the degree from nominal fit
-                            max_degree=max_degree,
-                            select_degree=None,  # Don't re-select, use frozen degree
-                            ridge_lambda=ridge_lambda,
-                            ridge_power=RIDGE_POWER,
-                            df_method=DF_METHOD,
-                            external_weights=mc_weights if len(mc_weights) > 0 else None,
-                            n_samples=n_samples,  # Actual MC sampling!
-                            rescale_unc_by_chi2=RESCALE_UNC_BY_CHI2,
-                            allow_shrink_unc=ALLOW_SHRINK_UNC,
-                            random_state=bin_seed,  # Deterministic seed for reproducibility
-                            use_band_discrepancy=use_band_discrepancy,
-                            min_points_per_band=min_points_per_band,
-                            max_tau_fraction=max_tau_fraction,
-                            # Fixed-c0 mode (Improvement 1.2)
-                            freeze_c0=FREEZE_C0,
-                            # Correlated normalization uncertainty (Improvement 1.3)
-                            sigma_norm=NORMALIZATION_SIGMA,
-                            norm_dist=NORM_DIST,
-                        )
-
-                        # Store each sample's coefficients
-                        for s_idx in range(n_samples):
-                            sample_coeffs = coef_df.iloc[s_idx].to_numpy()
-                            endf_coeffs = endf_normalize_legendre_coeffs(sample_coeffs, include_a0=False)
-                            all_samples[s_idx][energy_idx] = endf_coeffs
-
-                    n_sampled += 1
-
-                except Exception as e:
-                    # Fallback to nominal coefficients if sampling fails
-                    _logger.warning(f"  MC sampling failed for E={nr.energy_mev:.4f} MeV: {e}")
-                    endf_coeffs = endf_normalize_legendre_coeffs(nr.nominal_coeffs, include_a0=False)
-                    for s_idx in range(n_samples):
-                        all_samples[s_idx][energy_idx] = endf_coeffs
+            elif success:
+                n_sampled += 1
 
         _logger.info(f"  MC sampled: {n_sampled} bins, interpolated: {n_interpolated_used} bins")
 
@@ -1935,22 +2095,22 @@ def run_exfor_to_endf_sampling_v2(
             multigroup_result = None
 
     # Step 8: Write ENDF files
-    evaluation_file = None
+    average_file = None
     if generate_mc_mean_endf:
         _logger.info("")
-        _logger.info("[STEP 8] Writing evaluation ENDF file")
+        _logger.info("[STEP 8] Writing average ENDF file (MC mean)")
 
         try:
-            evaluation_file = write_evaluation_endf(
+            average_file = write_average_endf(
                 original_endf_file=endf_file,
                 mt_number=mt_number,
                 nominal_results=nominal_results,
                 all_samples=all_samples,
                 output_dir=str(output_path),
             )
-            _logger.info(f"  Evaluation ENDF: {evaluation_file}")
+            _logger.info(f"  Average ENDF: {average_file}")
         except Exception as e:
-            _logger.error(f"Failed to write evaluation ENDF: {str(e)}", console=True)
+            _logger.error(f"Failed to write average ENDF: {str(e)}", console=True)
 
     nominal_file = None
     if generate_nominal_endf:
@@ -1979,6 +2139,7 @@ def run_exfor_to_endf_sampling_v2(
             mt_number=mt_number,
             all_samples=all_samples,
             output_dir=str(output_path),
+            n_procs=N_PROCS,
         )
         _logger.info(f"  Written {len(output_files)} sample files")
 
@@ -2006,6 +2167,31 @@ def run_exfor_to_endf_sampling_v2(
             mt_data = mf4.sections.get(mt_number)
             all_energies_ev = np.array(mt_data.legendre_energies)
 
+            # Read original MF34 from the reference ENDF file (if present)
+            original_mf34_mt = None
+            try:
+                endf_for_mf34 = read_endf(endf_file, mf_numbers=34)
+                mf34_file = endf_for_mf34.get_file(34)
+                if mf34_file is not None:
+                    original_mf34_mt = mf34_file.sections.get(mt_number)
+                    if original_mf34_mt is not None:
+                        _logger.info(f"  Original MF34 found for MT{mt_number} — will merge with pipeline MF34")
+            except Exception:
+                pass  # No original MF34 available
+
+            # Helper to merge pipeline MF34 with original if available
+            def _maybe_merge(pipeline_mf34_obj, pipe_grid_ev):
+                if original_mf34_mt is not None:
+                    pipe_emin = float(pipe_grid_ev[0])
+                    pipe_emax = float(pipe_grid_ev[-1])
+                    return merge_mf34(
+                        original_mf34=original_mf34_mt,
+                        pipeline_mf34=pipeline_mf34_obj,
+                        pipeline_energy_min_ev=pipe_emin,
+                        pipeline_energy_max_ev=pipe_emax,
+                    )
+                return pipeline_mf34_obj
+
             # Write fine-grid MF34 if requested
             if mf34_covariance_type in ("fine", "both"):
                 processed_energies_ev = np.array([all_energies_ev[i] for i in energy_indices])
@@ -2028,9 +2214,11 @@ def run_exfor_to_endf_sampling_v2(
                     mt=mt_number,
                 )
 
-                if evaluation_file:
-                    write_mf34_to_file(evaluation_file, mf34_fine, evaluation_file)
-                    _logger.info(f"  Fine MF34 added to evaluation: {evaluation_file}")
+                mf34_fine = _maybe_merge(mf34_fine, energy_grid_ev)
+
+                if average_file:
+                    write_mf34_to_file(average_file, mf34_fine, average_file)
+                    _logger.info(f"  Fine MF34 added to average: {average_file}")
 
                 if nominal_file:
                     write_mf34_to_file(nominal_file, mf34_fine, nominal_file)
@@ -2048,16 +2236,18 @@ def run_exfor_to_endf_sampling_v2(
                     mt=mt_number,
                 )
 
+                mf34_mg = _maybe_merge(mf34_mg, multigroup_result.group_boundaries_ev)
+
                 # For multigroup, write to separate files with _mg suffix
-                if evaluation_file:
-                    mg_eval_file = evaluation_file.replace('.txt', '_mg.endf').replace('.endf', '_mg.endf')
-                    if mg_eval_file == evaluation_file:
-                        mg_eval_file = evaluation_file + '_mg'
-                    # Copy evaluation file and add multigroup MF34
+                if average_file:
+                    mg_avg_file = average_file.replace('.txt', '_mg.endf').replace('.endf', '_mg.endf')
+                    if mg_avg_file == average_file:
+                        mg_avg_file = average_file + '_mg'
+                    # Copy average file and add multigroup MF34
                     import shutil
-                    shutil.copy(evaluation_file, mg_eval_file)
-                    write_mf34_to_file(mg_eval_file, mf34_mg, mg_eval_file)
-                    _logger.info(f"  Multigroup MF34 written to: {mg_eval_file}")
+                    shutil.copy(average_file, mg_avg_file)
+                    write_mf34_to_file(mg_avg_file, mf34_mg, mg_avg_file)
+                    _logger.info(f"  Multigroup MF34 written to: {mg_avg_file}")
 
                 if nominal_file:
                     mg_nom_file = nominal_file.replace('.txt', '_mg.endf').replace('.endf', '_mg.endf')

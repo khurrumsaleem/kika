@@ -361,6 +361,66 @@ def smooth_tau_in_energy(
     return smoothed
 
 
+def apply_tau_prior_floor(
+    nominal_results: List,
+    min_experiments: int = 2,
+    percentile: float = 50.0,
+) -> Dict[str, float]:
+    """
+    Compute a per-band tau baseline from multi-experiment bins and enforce it
+    as a floor on single-experiment bins (partial pooling).
+
+    For bins with fewer than `min_experiments` experiments, the tau values are
+    raised to at least the baseline computed from well-estimated bins.
+
+    Parameters
+    ----------
+    nominal_results : List[NominalFitResult]
+        Nominal fit results (modified in-place).
+    min_experiments : int
+        Minimum number of experiments for a bin to be considered well-estimated.
+    percentile : float
+        Percentile of well-estimated tau values to use as baseline (e.g. 50 = median).
+
+    Returns
+    -------
+    Dict[str, float]
+        Baseline tau values per band {'tau_F': ..., 'tau_M': ..., 'tau_B': ...}.
+    """
+    bands = ['tau_F', 'tau_M', 'tau_B']
+    baselines: Dict[str, float] = {b: 0.0 for b in bands}
+
+    # Step 1: Collect tau values from well-estimated bins
+    well_estimated: Dict[str, List[float]] = {b: [] for b in bands}
+    for r in nominal_results:
+        if not r.has_data or r.interpolated:
+            continue
+        n_exp = len(r.experiments_info)
+        if n_exp >= min_experiments:
+            for b in bands:
+                val = r.tau_info.get(b, 0.0)
+                well_estimated[b].append(val)
+
+    # Step 2: Compute baseline per band (need >= 3 well-estimated bins)
+    for b in bands:
+        vals = well_estimated[b]
+        if len(vals) >= 3:
+            baselines[b] = float(np.percentile(vals, percentile))
+
+    # Step 3: Apply floor to under-estimated bins
+    for r in nominal_results:
+        if not r.has_data or r.interpolated:
+            continue
+        n_exp = len(r.experiments_info)
+        if n_exp < min_experiments:
+            updated = dict(r.tau_info)
+            for b in bands:
+                updated[b] = max(updated.get(b, 0.0), baselines[b])
+            r.tau_info = updated
+
+    return baselines
+
+
 # =============================================================================
 # KERNEL DIAGNOSTICS
 # =============================================================================
