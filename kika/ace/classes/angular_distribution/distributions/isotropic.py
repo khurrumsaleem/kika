@@ -133,16 +133,15 @@ class IsotropicAngularDistribution(AngularDistribution):
         methods = {
             ".sample_mu(energy, random_value)": "Sample a cosine μ = 2*random_value - 1",
             ".to_dataframe(energy, num_points)": "Convert to a pandas DataFrame with uniform probability",
-            ".plot(energy)": "Create a plot of the flat distribution"
         }
-        
+
         methods_section = create_repr_section(
-            "Calculation Methods:", 
-            methods, 
-            total_width=header_width, 
+            "Calculation Methods:",
+            methods,
+            total_width=header_width,
             method_col_width=property_col_width
         )
-        
+
         # Add example for directly accessing property
         example = (
             "Example:\n"
@@ -150,9 +149,7 @@ class IsotropicAngularDistribution(AngularDistribution):
             "# Access the MT number\n"
             "mt_value = int(distribution.mt.value)\n\n"
             "# Sample a cosine for any energy (will always be uniform)\n"
-            "mu = distribution.sample_mu(energy=1.0, random_value=0.5)  # Returns 0.0\n\n"
-            "# Create a plot showing the uniform distribution\n"
-            "fig, ax = distribution.plot(energy=1.0)\n"
+            "mu = distribution.sample_mu(energy=1.0, random_value=0.5)  # Returns 0.0\n"
         )
-        
+
         return header + description + info_table + properties_section + "\n" + methods_section + "\n" + example

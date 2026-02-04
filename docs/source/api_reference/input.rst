@@ -11,34 +11,34 @@ The input module provides functionality for working with MCNP input files.
 Submodules
 ----------
 
-kika.input.input
+kika.mcnp.input
 -----------------
 
-.. automodule:: kika.input.input
+.. automodule:: kika.mcnp.input
    :members:
    :undoc-members:
    :show-inheritance:
 
-kika.input.parse_input
+kika.mcnp.parse_input
 -----------------------
 
-.. automodule:: kika.input.parse_input
+.. automodule:: kika.mcnp.parse_input
    :members:
    :undoc-members:
    :show-inheritance:
 
-kika.input.pert_generator
+kika.mcnp.pert_generator
 --------------------------
 
-.. automodule:: kika.input.pert_generator
+.. automodule:: kika.mcnp.pert_generator
    :members:
    :undoc-members:
    :show-inheritance:
 
-kika.input.material
+kika.mcnp.material
 --------------------
 
-.. automodule:: kika.input.material
+.. automodule:: kika.mcnp.material
    :members:
    :undoc-members:
    :show-inheritance:

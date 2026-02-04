@@ -2,11 +2,13 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib import cm
 import matplotlib.colors as colors
 from typing import List, Optional, Union, Tuple, Dict, Any
-from ...._plot_settings import setup_plot_style, format_axes
+from ....plotting._backend_utils import _is_notebook, _detect_interactive_backend, _configure_figure_interactivity
+from ....plotting.styles import _apply_style_to_rcparams
 
 def plot_angular_distribution_3d(
     mf4_mixed,
@@ -79,24 +81,26 @@ def plot_angular_distribution_3d(
         The created figure with 3D plot
     """
     # Detect interactive mode properly
-    from ...._plot_settings import _is_notebook, _detect_interactive_backend
-    
     is_interactive = interactive
     if is_interactive is None:
         is_interactive = _is_notebook() and _detect_interactive_backend()
     
-    # Use setup_plot_style but disable constrained_layout for 3D
-    plot_kwargs = setup_plot_style(
-        style=style, 
-        figsize=figsize, 
-        interactive=is_interactive,
-        projection='3d',  # This tells setup_plot_style it's a 3D plot
-        **kwargs
+    # Apply style to matplotlib rcParams
+    _apply_style_to_rcparams(
+        style=style,
+        notebook_mode=_is_notebook(),
+        figsize=figsize,
+        dpi=100,
+        font_family='serif',
+        projection='3d'
     )
     
-    # Extract the created figure and axis
-    fig = plot_kwargs['_fig']
-    ax = plot_kwargs['ax']
+    # Create figure and 3D axes
+    fig = plt.figure(figsize=figsize)
+    ax = fig.add_subplot(111, projection='3d')
+    
+    # Configure interactivity
+    _configure_figure_interactivity(fig, is_interactive)
     
     # Determine which energies to use
     plot_energies = _determine_3d_plot_energies(mf4_mixed, energies, energy_indices, data_type)
@@ -278,15 +282,26 @@ def plot_angular_distribution_heatmap(
     plt.Figure
         The created figure with heatmap
     """
-    # Setup plot style - this handles all backend detection automatically
-    plot_kwargs = setup_plot_style(
-        style=style, 
-        figsize=figsize, 
-        interactive=interactive,
-        **kwargs
+    # Detect interactive mode
+    is_interactive = interactive
+    if is_interactive is None:
+        is_interactive = _is_notebook() and _detect_interactive_backend()
+    
+    # Apply style to matplotlib rcParams
+    _apply_style_to_rcparams(
+        style=style,
+        notebook_mode=_is_notebook(),
+        figsize=figsize,
+        dpi=100,
+        font_family='serif',
+        projection=None
     )
-    fig = plot_kwargs['_fig']
-    ax = plot_kwargs['ax']
+    
+    # Create figure and axes
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Configure interactivity
+    _configure_figure_interactivity(fig, is_interactive)
     
     # Determine which energies to use
     plot_energies = _determine_3d_plot_energies(mf4_mixed, energies, energy_indices, data_type)
@@ -358,14 +373,11 @@ def plot_angular_distribution_heatmap(
     cbar.set_label('Probability density f(μ,E)')
     
     # Format axes
-    ax = format_axes(
-        ax, style=style,
-        x_label="Cosine of scattering angle (μ)",
-        title=f"Angular Distribution Heatmap - MT{mf4_mixed.number}" + 
-              (f" ({data_type.capitalize()})" if data_type != 'both' else "")
-    )
-    
+    ax.set_xlabel("Cosine of scattering angle (μ)")
+    ax.set_title(f"Angular Distribution Heatmap - MT{mf4_mixed.number}" + 
+                 (f" ({data_type.capitalize()})" if data_type != 'both' else ""))
     ax.set_xlim(cosine_range)
+    ax.grid(True, alpha=0.3)
     
     return fig
 

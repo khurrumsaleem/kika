@@ -775,6 +775,7 @@ def MF34_to_MG(endf_object,
     result.energy_grid = mg_energy_edges
     result.weighting_function = weight_desc
     result.relative_normalization = relative_normalization
+    result.energy_unit = mf34_covmat.energy_unit  # Propagate energy unit from source data
     
     # Process each matrix in the MF34 covariance data
     for i in range(mf34_covmat.num_matrices):

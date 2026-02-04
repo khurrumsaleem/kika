@@ -12,10 +12,12 @@ from kika.sampling.generators import generate_samples
 from kika.ace.parsers import read_ace
 from kika.ace.writers.write_ace import write_ace
 from kika._constants import MT_GROUPS
+from kika._utils import MeV_to_kelvin
 from kika.ace.xsdir import create_xsdir_files_for_ace
 from kika.sampling.utils import (
     DualLogger, 
     _get_logger, 
+    _set_logger,
     load_covariance,
     _initialize_master_perturbation_matrix,
     _update_master_perturbation_matrix,
@@ -39,7 +41,16 @@ def _process_sample(
     # — write perturbed ACE —
     base, ext = os.path.splitext(os.path.basename(ace_file))
     sample_str = f"{sample_index+1:04d}"
-    sample_dir = os.path.join(output_dir, str(ace.zaid), sample_str)
+    
+    # Convert temperature from MeV to Kelvin for directory structure
+    hdr = ace.header
+    temp_K = MeV_to_kelvin(hdr.temperature)
+    
+    # Use exact temperature formatting to match ENDF perturbation directory structure
+    temp_str = str(temp_K).rstrip('0').rstrip('.') if '.' in str(temp_K) else str(temp_K)
+    
+    # Create directory structure: output_dir/ace/temp/zaid/sample_num/
+    sample_dir = os.path.join(output_dir, "ace", temp_str, str(ace.zaid), sample_str)
     os.makedirs(sample_dir, exist_ok=True)
     out_ace = os.path.join(sample_dir, f"{base}_{sample_str}{ext}")
     
@@ -50,11 +61,7 @@ def _process_sample(
     write_ace(ace, out_ace, overwrite=True)
 
     # — write xsdir files using shared function —
-    hdr = ace.header
     has_ptable = bool(getattr(ace.unresolved_resonance, 'has_data', False))
-    
-    # Get the proper cross-section library extension from the ACE file
-    base, file_ext = os.path.splitext(os.path.basename(ace_file))
     
     create_xsdir_files_for_ace(
         ace_file_path=out_ace,
@@ -67,29 +74,6 @@ def _process_sample(
         master_xsdir_file=xsdir_file,
         has_ptable=has_ptable,
     )
-
-    # — write this sample's small summary file —
-    n_groups    = len(energy_grid) - 1
-    boundaries  = np.asarray(energy_grid, dtype=np.float32)  # Convert energy boundaries to float32
-    summary_tmp = os.path.join(sample_dir, f"{base}_{sample_str}_summary.txt")
-
-    # Convert sample to float32 for consistency
-    sample = sample.astype(np.float32)
-
-    with open(summary_tmp, 'w') as sf:
-
-        for mt_idx, mt in enumerate(mt_numbers):
-            start    = mt_idx * n_groups
-            end      = start + n_groups
-            grp_facs = sample[start:end]
-
-            for grp in range(n_groups):
-                low, high = boundaries[grp], boundaries[grp+1]
-                fac       = grp_facs[grp]
-                # Use 6 decimal places for float32 precision for all values
-                sf.write(f"{mt:<3}\t{low:.6e}\t{high:.6e}\t{fac:.6e}\n")
-
-        sf.write("\n")
 
 
 def perturb_ACE_files(
@@ -175,6 +159,7 @@ def perturb_ACE_files(
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_file = os.path.join(output_dir, f'ace_perturbation_{timestamp}.log')
     _logger = DualLogger(log_file)
+    _set_logger(_logger)
     
     # Console: Basic start message
     print(f"[INFO] Starting ACE perturbation job")
@@ -516,7 +501,16 @@ def perturb_ACE_files(
         
         _logger.info(f"\n{subseparator}\n")
 
-        energy_grid = cov.energy_grid
+        # Convert energy grid from eV to MeV for ACE (ACE energies are in MeV)
+        # CovMat now stores energies in eV by default
+        energy_grid_eV = cov.energy_grid
+        if cov.energy_unit == 'eV':
+            energy_grid = [e / 1e6 for e in energy_grid_eV]  # Convert eV to MeV
+            _logger.info(f"  Converted energy grid from eV to MeV for ACE compatibility")
+        elif cov.energy_unit == 'MeV':
+            energy_grid = energy_grid_eV
+        else:
+            raise ValueError(f"Unknown energy unit '{cov.energy_unit}' in covariance matrix")
 
         # Save pre-autofix MT list
         pre_autofix_mts = list(mt_perturb)
@@ -606,17 +600,12 @@ def perturb_ACE_files(
                 matrix_dir, zaid, factors, mt_perturb_final, energy_grid, verbose
             )
 
-        # -- prepare output dirs ----------------------------------------------
-        iso_dir = os.path.join(output_dir, str(zaid))
-        os.makedirs(iso_dir, exist_ok=True)
-
         # =====================================================================
         #  DRY‑RUN
         # =====================================================================
         if dry_run:
             _logger.info(f"\n[ACE] [DRY-RUN] Generating only perturbation factors (no ACE files will be written)")
-            for j in range(num_samples):
-                _write_sample_summary(factors[j], j, energy_grid, mt_perturb_final, iso_dir, base)
+            _logger.info(f"  Perturbation factors stored in master matrix")
             _logger.info(f"\n{separator}\n")
             continue
 
@@ -883,35 +872,3 @@ def _apply_factors_to_mt(ace, mt, factors, boundaries, verbose=True):
         grp = bin_idx[i]
         if 0 <= grp < len(factors):
             entry.value *= float(factors[grp])  # Convert to float for multiplication
-
-
-def _write_sample_summary(
-    sample: np.ndarray,
-    sample_index: int,
-    energy_grid: List[float],
-    mt_numbers: List[int],
-    iso_dir: str,
-    base: str,
-):
-    """Serialise a single sample's perturbation factors."""
-    n_groups = len(energy_grid) - 1
-    boundaries = np.asarray(energy_grid, dtype=np.float32) 
-    tag = f"{sample_index + 1:04d}"
-    sdir = os.path.join(iso_dir, tag)
-    os.makedirs(sdir, exist_ok=True)
-    path = os.path.join(sdir, f"{base}_{tag}_pert_factors.txt")
-
-    # Convert sample to float32
-    sample = sample.astype(np.float32)
-
-    with open(path, "w") as f:
-        for mt_idx, mt in enumerate(mt_numbers):
-            start = mt_idx * n_groups
-            end = start + n_groups
-            slice_ = sample[start:end]
-            for grp in range(n_groups):
-                lo, hi = boundaries[grp], boundaries[grp + 1]
-                fac = slice_[grp]
-                # Use 6 decimal places for float32 precision for all values
-                f.write(f"{mt:<3}\t{lo:.6e}\t{hi:.6e}\t{fac:.6e}\n")
-        f.write("\n")

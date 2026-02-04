@@ -293,13 +293,12 @@ class MF4MTTabulated(MF4MT):
             isotope = str(self.zaid)
         
         mt = getattr(self, 'number', None)
-        
+
         # Auto-generate label if not provided
         if label is None:
-            label = f'Tabulated→Legendre L={order}'
-            if isotope:
-                label = f'{isotope} {label}'
-        
+            from kika._constants import format_plot_label
+            label = format_plot_label(isotope=isotope, mt=mt, order=order)
+
         return LegendreCoeffPlotData(
             x=energies,
             y=coeff_values,
@@ -310,7 +309,73 @@ class MF4MTTabulated(MF4MT):
             label=label,
             **styling_kwargs
         )
-    
+
+    def to_bulk_plot_data(
+        self,
+        max_order: int = 12,
+        quad_order: int = 96
+    ) -> Dict[str, Union[List[float], Dict[int, List[float]], int, str]]:
+        """
+        Extract ALL Legendre orders at once for bulk loading.
+
+        For tabulated distributions (LTT=2), coefficients are computed by projecting
+        f(μ,E) onto Legendre polynomials using Gauss-Legendre quadrature.
+
+        Parameters
+        ----------
+        max_order : int, optional
+            Maximum Legendre order to compute (default: 12)
+        quad_order : int, optional
+            Quadrature order for Gauss-Legendre integration (default: 96)
+
+        Returns
+        -------
+        dict
+            Dictionary containing:
+            - 'energies': list of energy values (eV)
+            - 'coefficients_by_order': dict mapping order (int) to list of coefficients
+            - 'max_order': maximum order extracted
+            - 'isotope': isotope identifier (if available)
+            - 'mt': MT reaction number
+        """
+        energies = np.array(self._energies, dtype=float)
+
+        if len(energies) == 0:
+            return {
+                'energies': [],
+                'coefficients_by_order': {},
+                'max_order': 0,
+                'isotope': getattr(self, 'isotope', None),
+                'mt': getattr(self, 'number', None),
+            }
+
+        # Extract all Legendre coefficients at once using the built-in method
+        coeffs_dict = self.extract_legendre_coefficients(
+            energy=energies,
+            max_legendre_order=max_order,
+            quad_order=quad_order,
+            out_of_range="zero"
+        )
+
+        # Convert to the expected format
+        coefficients_by_order: Dict[int, List[float]] = {}
+        for order in range(max_order + 1):
+            if order in coeffs_dict:
+                vals = coeffs_dict[order]
+                if isinstance(vals, np.ndarray):
+                    coefficients_by_order[order] = vals.tolist()
+                else:
+                    coefficients_by_order[order] = [float(vals)] * len(energies)
+            else:
+                coefficients_by_order[order] = [0.0] * len(energies)
+
+        return {
+            'energies': energies.tolist(),
+            'coefficients_by_order': coefficients_by_order,
+            'max_order': max_order,
+            'isotope': getattr(self, 'isotope', None),
+            'mt': getattr(self, 'number', None),
+        }
 
     def __str__(self) -> str:
         """

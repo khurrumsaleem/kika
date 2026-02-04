@@ -1,7 +1,6 @@
-from typing import Optional, Tuple
+from typing import Optional
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from kika.ace.classes.xss import XssEntry
 from kika.ace.classes.angular_distribution.base import AngularDistribution
@@ -288,69 +287,6 @@ class KalbachMannAngularDistribution(AngularDistribution):
                 f"Error calculating Kalbach-Mann distribution for MT={mt_value}: {str(e)}"
             ) from e
     
-    def plot(self, energy: float, ace=None, ax=None, title=None, **kwargs) -> Optional[Tuple]:
-        """
-        Plot the Kalbach-Mann angular distribution for a specific incident energy.
-        
-        Parameters
-        ----------
-        energy : float
-            Incident energy to evaluate the distribution at
-        ace : Ace, optional
-            ACE object containing the Law=44 distribution data
-        ax : matplotlib.axes.Axes, optional
-            Axes to plot on, if None a new figure is created
-        title : str, optional
-            Title for the plot, if None a default title is used
-        **kwargs : dict
-            Additional keyword arguments passed to the plot function
-            
-        Returns
-        -------
-        tuple or None
-            Tuple of (fig, ax) or None if matplotlib is not available
-            
-        Raises
-        ------
-        Law44DataError
-            If the ACE object is not provided or the Law=44 data is missing/invalid
-        """
-            
-        # Get the data to plot - this will raise Law44DataError if ACE is missing
-        df = self.to_dataframe(energy, ace)
-        
-        # Create figure and axes if not provided
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(8, 6))
-        else:
-            fig = ax.figure
-        
-        # Set default parameters if not specified
-        if 'linewidth' not in kwargs:
-            kwargs['linewidth'] = 2
-        if 'color' not in kwargs:
-            kwargs['color'] = 'blue'
-        
-        # Plot the data
-        ax.plot(df['cosine'], df['pdf'], **kwargs)
-        
-        # Set labels and title
-        ax.set_xlabel('Cosine (μ)')
-        ax.set_ylabel('Probability Density')
-        
-        if title is None:
-            mt_value = int(self.mt.value) if hasattr(self.mt, 'value') else int(self.mt)
-            title = f'Kalbach-Mann Angular Distribution for MT={mt_value} at {energy:.4g} MeV'
-        ax.set_title(title)
-        
-        # Set axis limits
-        ax.set_xlim(-1, 1)
-        
-        # Add grid
-        ax.grid(True, alpha=0.3)
-        
-        return fig, ax
-    
     def __str__(self) -> str:
         """Human-readable string representation."""
         mt_value = int(self.mt.value) if hasattr(self.mt, 'value') else int(self.mt)
@@ -463,16 +399,15 @@ class KalbachMannAngularDistribution(AngularDistribution):
         # Methods section
         methods = {
             ".to_dataframe(energy, ace, num_points)": "Convert to a pandas DataFrame at a specific energy",
-            ".plot(energy, ace)": "Create a plot of the distribution at a specific energy"
         }
-        
+
         methods_section = create_repr_section(
-            "Calculation Methods (All require ACE object):", 
-            methods, 
-            total_width=header_width, 
+            "Calculation Methods (All require ACE object):",
+            methods,
+            total_width=header_width,
             method_col_width=property_col_width
         )
-        
+
         # Add example for using this specific distribution type
         example = (
             "Example:\n"
@@ -481,13 +416,13 @@ class KalbachMannAngularDistribution(AngularDistribution):
             "mt_value = int(distribution.mt.value)\n"
             "reaction_idx = distribution.reaction_index\n"
             "is_particle = distribution.is_particle_production\n\n"
-            "# Create a plot showing the Kalbach-Mann distribution at 14 MeV\n"
+            "# Get data as DataFrame at 14 MeV\n"
             "try:\n"
-            "    fig, ax = distribution.plot(energy=14.0, ace=ace_object)\n"
+            "    df = distribution.to_dataframe(energy=14.0, ace=ace_object)\n"
             "except Law44DataError as e:\n"
             "    print(f\"Error: {e}\")\n"
         )
-        
+
         return header + description + info_table + properties_section + "\n" + error_section + methods_section + "\n" + example
 
 

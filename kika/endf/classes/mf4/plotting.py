@@ -1,7 +1,104 @@
+"""
+DEPRECATED: Legacy plotting functions for ENDF MF4 data.
+
+This module contains legacy plotting functions that use the old plotting style.
+These functions are maintained for backward compatibility but are deprecated.
+
+RECOMMENDED APPROACH:
+--------------------
+Use the `.to_plot_data()` methods on MF4 objects with PlotBuilder:
+
+    from kika.plotting import PlotBuilder
+    
+    # Single coefficient
+    data = endf.to_plot_data(mf=4, mt=2, order=1)
+    fig = PlotBuilder().add_data(data).build()
+    
+    # Multiple coefficients with uncertainties
+    builder = PlotBuilder(style='light')
+    for order in [1, 2, 3]:
+        data, unc_band = endf.to_plot_data(mf=4, mt=2, order=order, uncertainty=True)
+        if unc_band is not None:
+            builder.add_data(data, uncertainty=unc_band)
+        else:
+            builder.add_data(data)
+    fig = builder.build()
+
+The new approach provides:
+- Consistent API with ACE plotting
+- Better separation of data and presentation
+- More flexibility for customization
+- Proper integration with the plotting infrastructure
+
+For 3D visualizations, use plotting3D module.
+"""
+
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 from typing import List, Optional, Union, Tuple, Dict, Any
-from ...._plot_settings import setup_plot_style, format_axes
+from ....plotting._backend_utils import _is_notebook, _detect_interactive_backend, _configure_figure_interactivity
+from ....plotting.styles import _apply_style_to_rcparams, _get_color_palette, format_energy_axis_ticks
+
+
+def _setup_legacy_plot(style='light', figsize=(8, 5), **kwargs):
+    """
+    Helper to setup matplotlib figure and axes for legacy plotting functions.
+    
+    Returns (fig, ax, colors) tuple.
+    """
+    # Detect notebook mode
+    notebook_mode = _is_notebook()
+    
+    # Apply style
+    _apply_style_to_rcparams(
+        style=style,
+        notebook_mode=notebook_mode,
+        figsize=figsize,
+        dpi=kwargs.get('dpi', 100),
+        font_family=kwargs.get('font_family', 'serif'),
+        projection=None
+    )
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Get colors
+    colors = _get_color_palette(style)
+    
+    return fig, ax, colors
+
+
+def _format_legacy_axes(ax, style='light', x_label=None, y_label=None, title=None, 
+                        legend_loc='best', use_log_x=False):
+    """Helper to format axes for legacy plotting functions."""
+    if use_log_x:
+        ax.set_xscale('log')
+        format_energy_axis_ticks(ax)
+    
+    if x_label:
+        ax.set_xlabel(x_label)
+    if y_label:
+        ax.set_ylabel(y_label)
+    if title:
+        ax.set_title(title)
+    
+    # Add legend if there are labeled items
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        legend_kwargs = {'loc': legend_loc, 'framealpha': 0.9}
+        if style == 'light':
+            legend_kwargs.update({'frameon': True, 'fancybox': False, 'edgecolor': 'black'})
+        else:
+            legend_kwargs['fancybox'] = True
+        ax.legend(**legend_kwargs)
+    
+    ax.grid(True, which='major', linestyle='--', alpha=0.4)
+    if style == 'light':
+        ax.minorticks_on()
+        ax.grid(True, which='minor', linestyle=':', alpha=0.25, linewidth=0.5)
+    
+    return ax
 
 
 def _generate_unique_labels(endf_list, labels):
@@ -256,10 +353,7 @@ def plot_legendre_coefficients_from_endf(
             raise ValueError(f"MT{mt} not found in MF4 for ENDF object {i+1} ({endf_labels[i]}). Available MTs: {available_mts}")
     
     # Setup plot style
-    plot_kwargs = setup_plot_style(style=style, figsize=figsize, **kwargs)
-    fig = plot_kwargs['_fig']
-    ax = plot_kwargs['ax']
-    colors = plot_kwargs['_colors']
+    fig, ax, colors = _setup_legacy_plot(style=style, figsize=figsize, **kwargs)
     
     # Get the first valid ENDF object to determine available orders
     first_endf = endf_list[0]
@@ -400,12 +494,13 @@ def plot_legendre_coefficients_from_endf(
     title = " - ".join(title_parts)
     
     # Format axes
-    ax = format_axes(
-        ax, style=style, use_log_scale=True, is_energy_axis=True,
+    ax = _format_legacy_axes(
+        ax, style=style,
         x_label="Energy (eV)",
         y_label="Coefficient value",
         title=title,
-        legend_loc=legend_loc
+        legend_loc=legend_loc,
+        use_log_x=True
     )
     
     # Apply energy range limits if specified
@@ -520,10 +615,7 @@ def plot_legendre_coefficient_uncertainties_from_endf(
             raise ValueError(f"MT{mt} not found in MF34 for ENDF object {i+1} ({endf_labels[i]}). Available MTs: {available_mts}")
     
     # Setup plot style
-    plot_kwargs = setup_plot_style(style=style, figsize=figsize, **kwargs)
-    fig = plot_kwargs['_fig']
-    ax = plot_kwargs['ax']
-    colors = plot_kwargs['_colors']
+    fig, ax, colors = _setup_legacy_plot(style=style, figsize=figsize, **kwargs)
     
     # Get the first valid ENDF object to determine available orders
     first_endf = endf_list[0]
@@ -774,13 +866,8 @@ def plot_legendre_coefficient_uncertainties_from_endf(
         y_label = "Absolute uncertainty"
     
     # Format axes
-    ax = format_axes(
-        ax, style=style, use_log_scale=True, is_energy_axis=True,
-        x_label="Energy (eV)",
-        y_label=y_label,
-        title=title,
-        legend_loc=legend_loc
-    )
+    ax = _format_legacy_axes(ax, style=style, x_label="Energy (eV)", y_label=y_label, title=title, legend_loc=legend_loc
+   , use_log_x=True)
     
     # Apply energy range limits if specified
     if energy_range is not None:
@@ -853,10 +940,7 @@ def plot_angular_distribution(
         Additional plotting arguments
     """
     # Setup plot style
-    plot_kwargs = setup_plot_style(style=style, figsize=figsize, **kwargs)
-    fig = plot_kwargs['_fig']
-    ax = plot_kwargs['ax']
-    colors = plot_kwargs['_colors']
+    fig, ax, colors = _setup_legacy_plot(style=style, figsize=figsize, **kwargs)
     
     # Determine which energies to plot based on data_type
     plot_energies = _determine_plot_energies_by_type(mf4_mixed, energies, energy_indices, data_type)
@@ -883,12 +967,13 @@ def plot_angular_distribution(
             )
     
     # Format axes
-    ax = format_axes(
+    ax = _format_legacy_axes(
         ax, style=style,
         x_label="Cosine of scattering angle (μ)",
         y_label="Probability density f(μ,E)",
         title=f"Angular Distribution - MT{mf4_mixed.number}",
-        legend_loc=legend_loc
+        legend_loc=legend_loc,
+        use_log_x=False
     )
     
     ax.set_xlim(cosine_range)
@@ -1345,10 +1430,7 @@ def plot_legendre_coefficient_comparison(
         comparison_endfs = [comparison_endfs]
     
     # Setup plot style
-    plot_kwargs = setup_plot_style(style=style, figsize=figsize, **kwargs)
-    fig = plot_kwargs['_fig']
-    ax = plot_kwargs['ax']
-    colors = plot_kwargs['_colors']
+    fig, ax, colors = _setup_legacy_plot(style=style, figsize=figsize, **kwargs)
     
     # Helper function to extract coefficient data from an ENDF object
     def extract_coefficient_data(endf, mt, order):
@@ -1483,13 +1565,8 @@ def plot_legendre_coefficient_comparison(
     title = " - ".join(title_parts)
     
     # Format axes
-    ax = format_axes(
-        ax, style=style, use_log_scale=True, is_energy_axis=True,
-        x_label="Energy (eV)",
-        y_label="Coefficient value",
-        title=title,
-        legend_loc=legend_loc
-    )
+    ax = _format_legacy_axes(ax, style=style, x_label="Energy (eV)", y_label="Coefficient value", title=title, legend_loc=legend_loc
+   , use_log_x=True)
     
     # Apply energy range limits if specified
     if energy_range is not None:

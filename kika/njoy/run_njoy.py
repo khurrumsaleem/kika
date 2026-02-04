@@ -198,7 +198,7 @@ def run_njoy(
     title = _render_title(isotope_label=isotope_symbol, T=temp_K, library_name=library_name, njoy_version=njoy_version)
     njoy_input = _render_njoy_input(mat=mat, T=temperature, title=title, suff=suff)
 
-    workdir = Path(tempfile.mkdtemp(prefix="njoy_"))
+    workdir = Path(tempfile.mkdtemp(prefix="njoy_", dir=output_dir))
 
     try:
         # NJOY expects tape files with specific unit numbers

@@ -223,8 +223,155 @@ class SDFData:
         footer = "\n\nAvailable methods:\n"
         footer += "- .write_file() - Write SDF data to a file\n"
         footer += "- .group_inelastic_reactions() - Group MT 51-91 into MT 4\n"
+        footer += "- SDFData.merge() - Merge multiple SDF objects\n"
+        footer += "- SDFData.can_merge() - Check if SDF objects can be merged\n"
         
         return header + stats + energy_preview + data_summary + footer
+
+    @classmethod
+    def merge(cls, sdf_list: List['SDFData'],
+              title: Optional[str] = None,
+              energy: Optional[str] = None,
+              r0: Optional[float] = None,
+              e0: Optional[float] = None) -> 'SDFData':
+        """Merge multiple SDFData objects into a single one.
+
+        All SDFs must share the same perturbation energy grid.  The merged
+        object contains every ``SDFReactionData`` entry from the inputs;
+        duplicate ``(zaid, mt)`` pairs are not allowed.
+
+        :param sdf_list: List of SDFData objects to combine.
+        :type sdf_list: List[SDFData]
+        :param title: Override title. If *None*, uses the common title when all
+            inputs match, otherwise joins distinct titles with ``" + "``.
+        :type title: Optional[str]
+        :param energy: Override energy label. If *None*, uses the common label
+            when all inputs match, otherwise raises ``ValueError``.
+        :type energy: Optional[str]
+        :param r0: Override response value. If *None*, uses the common value
+            when all inputs agree, otherwise raises ``ValueError``.
+        :type r0: Optional[float]
+        :param e0: Override relative error. If *None*, uses the common value
+            when all inputs agree, otherwise raises ``ValueError``.
+        :type e0: Optional[float]
+        :returns: A new merged SDFData instance.
+        :rtype: SDFData
+        :raises ValueError: If *sdf_list* is empty, energy grids differ,
+            r0/e0 values conflict (and none was given), energy labels differ
+            (and none was given), or duplicate (zaid, mt) pairs are found.
+        """
+        if not sdf_list:
+            raise ValueError("Cannot merge an empty list of SDFData objects")
+
+        # --- energy grid ---
+        ref_energies = sdf_list[0].pert_energies
+        for i, sdf in enumerate(sdf_list[1:], 1):
+            if sdf.pert_energies != ref_energies:
+                raise ValueError(
+                    f"Energy grids do not match: SDF 0 ('{sdf_list[0].title}') has "
+                    f"{len(ref_energies)} boundaries, SDF {i} ('{sdf.title}') has "
+                    f"{len(sdf.pert_energies)} boundaries"
+                )
+
+        # --- r0 / e0 ---
+        if r0 is None:
+            r0_values = {s.r0 for s in sdf_list if s.r0 is not None}
+            if len(r0_values) > 1:
+                raise ValueError(
+                    f"SDFs have different r0 values {r0_values}. "
+                    f"Provide the 'r0' parameter explicitly."
+                )
+            r0 = r0_values.pop() if r0_values else None
+
+        if e0 is None:
+            e0_values = {s.e0 for s in sdf_list if s.e0 is not None}
+            if len(e0_values) > 1:
+                raise ValueError(
+                    f"SDFs have different e0 values {e0_values}. "
+                    f"Provide the 'e0' parameter explicitly."
+                )
+            e0 = e0_values.pop() if e0_values else None
+
+        # --- energy label ---
+        if energy is None:
+            labels = {s.energy for s in sdf_list}
+            if len(labels) == 1:
+                energy = labels.pop()
+            else:
+                raise ValueError(
+                    f"SDFs have different energy labels {labels}. "
+                    f"Provide the 'energy' parameter explicitly."
+                )
+
+        # --- title ---
+        if title is None:
+            titles = list(dict.fromkeys(s.title for s in sdf_list))  # unique, order-preserving
+            title = " + ".join(titles)
+
+        # --- duplicate check & collect data ---
+        seen = {}
+        combined_data = []
+        for i, sdf in enumerate(sdf_list):
+            for rd in sdf.data:
+                key = (rd.zaid, rd.mt)
+                if key in seen:
+                    raise ValueError(
+                        f"Duplicate reaction: {rd.nuclide} {rd.reaction_name} "
+                        f"(ZAID={rd.zaid}, MT={rd.mt}) appears in SDF {seen[key]} "
+                        f"and SDF {i} ('{sdf.title}')"
+                    )
+                seen[key] = i
+                combined_data.append(rd)
+
+        return cls(
+            title=title,
+            energy=energy,
+            pert_energies=ref_energies,
+            r0=r0,
+            e0=e0,
+            data=combined_data,
+        )
+
+    @classmethod
+    def can_merge(cls, sdf_list: List['SDFData'],
+                  energy: Optional[str] = None,
+                  r0: Optional[float] = None,
+                  e0: Optional[float] = None) -> Tuple[bool, str]:
+        """Check whether a list of SDFData objects can be merged.
+
+        Runs the same validation as :meth:`merge` but never raises.
+        Pass the same override parameters you would pass to :meth:`merge`
+        to check whether the merge would succeed with those overrides.
+
+        :param sdf_list: List of SDFData objects to check.
+        :type sdf_list: List[SDFData]
+        :param energy: Override energy label (same as in :meth:`merge`).
+        :type energy: Optional[str]
+        :param r0: Override response value (same as in :meth:`merge`).
+        :type r0: Optional[float]
+        :param e0: Override relative error (same as in :meth:`merge`).
+        :type e0: Optional[float]
+        :returns: ``(True, "")`` if the merge would succeed, or
+            ``(False, reason)`` with a human-readable explanation otherwise.
+        :rtype: Tuple[bool, str]
+        """
+        try:
+            cls.merge(sdf_list, energy=energy, r0=r0, e0=e0)
+            return True, ""
+        except ValueError as exc:
+            return False, str(exc)
+
+    def __add__(self, other: 'SDFData') -> 'SDFData':
+        """Merge two SDFData objects using the ``+`` operator.
+
+        :param other: Another SDFData object.
+        :type other: SDFData
+        :returns: A new merged SDFData instance.
+        :rtype: SDFData
+        """
+        if not isinstance(other, SDFData):
+            return NotImplemented
+        return SDFData.merge([self, other])
 
     def write_file(self, output_dir: Optional[str] = None):
         """
@@ -254,7 +401,7 @@ class SDFData:
         # Sort the data by ZAID and then by MT number
         sorted_data = sorted(self.data, key=lambda x: (x.zaid, x.mt))
         
-        with open(filepath, 'w') as file:
+        with open(filepath, 'w', encoding='utf-8') as file:
             # Write header
             file.write(f"{self.title} MCNP to SCALE sdf {ngroups}gr\n")
             file.write(f"       {ngroups} number of neutron groups\n")

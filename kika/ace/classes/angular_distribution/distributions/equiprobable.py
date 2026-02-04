@@ -293,14 +293,13 @@ class EquiprobableAngularDistribution(AngularDistribution):
         # Create a section for available methods
         methods = {
             ".to_dataframe(energy, interpolate=False)": "Get distribution at a specific energy as DataFrame",
-            ".plot(energy)": "Plot the distribution at a specific energy"
         }
-        
+
         methods_section = create_repr_section(
-            "Methods to Visualize Data:", 
-            methods, 
-            total_width=header_width, 
+            "Methods to Access Data:",
+            methods,
+            total_width=header_width,
             method_col_width=property_col_width
         )
-        
+
         return header + description + properties_section + "\n" + methods_section

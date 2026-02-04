@@ -10,19 +10,29 @@ from .plot_data import (
     LegendreCoeffPlotData,
     LegendreUncertaintyPlotData,
     AngularDistributionPlotData,
+    CrossSectionPlotData,
     MultigroupXSPlotData,
     MultigroupUncertaintyPlotData,
     UncertaintyBand,
+    HeatmapPlotData,
+    CovarianceHeatmapData,
+    MF34HeatmapData,
 )
 from .plot_builder import PlotBuilder
+from .heatmap_builder import HeatmapBuilder
 
 __all__ = [
     'PlotData',
     'LegendreCoeffPlotData',
     'LegendreUncertaintyPlotData',
     'AngularDistributionPlotData',
+    'CrossSectionPlotData',
     'MultigroupXSPlotData',
     'MultigroupUncertaintyPlotData',
     'UncertaintyBand',
+    'HeatmapPlotData',
+    'CovarianceHeatmapData',
+    'MF34HeatmapData',
     'PlotBuilder',
+    'HeatmapBuilder',
 ]
