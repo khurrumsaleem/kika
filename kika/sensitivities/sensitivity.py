@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
-from kika._constants import ATOMIC_NUMBER_TO_SYMBOL
-from typing import Dict, Union, List, Optional
+from kika._constants import ATOMIC_NUMBER_TO_SYMBOL, MT_TO_REACTION
+from typing import Dict, Union, List, Optional, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
 import math
@@ -317,16 +317,26 @@ class SensitivityData:
         self.nuclide = f"{ATOMIC_NUMBER_TO_SYMBOL[z]}-{a}"
 
     def plot_sensitivity(self, energy: Union[str, List[str]] = None, 
-             reaction: Union[List[int], int] = None, xlim: tuple = None):
+             reaction: Union[List[int], int] = None, energy_range: tuple = None, xlog: bool = False, ylog: bool = False):
         """Plot sensitivity coefficients for specified energies and reactions.
 
-        :param energy: Energy string(s) to plot. If None, plots all energies
-        :type energy: Union[str, List[str]], optional
-        :param reaction: Reaction number(s) to plot. If None, plots all reactions
-        :type reaction: Union[List[int], int], optional
-        :param xlim: Optional x-axis limits as (min, max)
-        :type xlim: tuple, optional
-        :raises ValueError: If specified energies are not found in the data
+        Parameters
+        ----------
+        energy : Union[str, List[str]], optional
+            Energy string(s) to plot. If None, plots all energies.
+        reaction : Union[List[int], int], optional
+            Reaction number(s) to plot. If None, plots all reactions.
+        energy_range : tuple, optional
+            Optional x-axis limits as (min, max).
+        xlog : bool, optional
+            Whether to use logarithmic scale for x-axis. Default is False.
+        ylog : bool, optional
+            Whether to use logarithmic scale for y-axis. Default is False.
+
+        Raises
+        ------
+        ValueError
+            If specified energies are not found in the data.
         """
         # If no energy specified, use all energies
         if energy is None:
@@ -389,11 +399,19 @@ class SensitivityData:
                     ax.axis('off')
                 else:
                     coef = coeffs_dict[rxn]
-                    coef.plot(ax=ax, xlim=xlim)
+                    coef.plot(ax=ax, xlim=energy_range)
 
             # Hide any extra subplots
             for j in range(n, len(axes)):
                 axes[j].axis('off')
+            
+            # Apply logarithmic scales if requested
+            if xlog:
+                for ax in axes:
+                    ax.set_xscale('log')
+            if ylog:
+                for ax in axes:
+                    ax.set_yscale('log')
             
             plt.tight_layout()
             plt.show()
@@ -1136,7 +1154,90 @@ class Coefficients:
         return pd.DataFrame(data, columns=[
             'energy', 'reaction', 'e_lower', 'e_upper', 'sensitivity', 'error'
         ])
-    
+
+    def to_plot_data(
+        self,
+        per_lethargy: bool = True,
+        uncertainty: bool = True,
+        sigma: float = 1.0,
+        uncertainty_style: str = 'errorbar',
+        label: str = None,
+        **styling_kwargs,
+    ) -> Union['MultigroupXSPlotData', Tuple['MultigroupXSPlotData', 'UncertaintyBand']]:
+        """Convert sensitivity coefficients into PlotData objects.
+
+        Returns a :class:`~kika.plotting.MultigroupXSPlotData` (step plot) and,
+        optionally, an :class:`~kika.plotting.UncertaintyBand` suitable for
+        :class:`~kika.plotting.PlotBuilder`.
+
+        :param per_lethargy: If True, normalise sensitivity values by the lethargy
+            width of each bin (matches ``Coefficients.plot()`` behaviour).
+        :type per_lethargy: bool
+        :param uncertainty: If True, return an ``UncertaintyBand`` alongside the
+            nominal data.
+        :type uncertainty: bool
+        :param sigma: Sigma multiplier for the uncertainty band.
+        :type sigma: float
+        :param uncertainty_style: Rendering style for the uncertainty band:
+            ``'errorbar'`` (default) or ``'band'``.
+        :type uncertainty_style: str
+        :param label: Legend label. Auto-generated as
+            ``"<reaction_name> (MT<reaction>)"`` when *None*.
+        :type label: str, optional
+        :param styling_kwargs: Forwarded to ``MultigroupXSPlotData``
+            (``color``, ``linestyle``, ``linewidth``, etc.).
+        :returns: ``MultigroupXSPlotData`` when *uncertainty=False*,
+            or ``(MultigroupXSPlotData, UncertaintyBand)`` when *uncertainty=True*.
+        :rtype: MultigroupXSPlotData or Tuple[MultigroupXSPlotData, UncertaintyBand]
+        """
+        from kika.plotting import MultigroupXSPlotData, UncertaintyBand
+
+        energies = np.asarray(self.pert_energies, dtype=float)
+        sens = np.asarray(self.values, dtype=float)
+
+        if per_lethargy:
+            lethargy = np.log(energies[1:] / energies[:-1])
+            y_vals = sens / lethargy
+        else:
+            y_vals = sens.copy()
+
+        # Step plot: n+1 x-points, repeat last y value
+        x = energies
+        y = np.append(y_vals, y_vals[-1])
+
+        if label is None:
+            reaction_name = MT_TO_REACTION.get(self.reaction, f"MT{self.reaction}")
+            label = f"{reaction_name} (MT{self.reaction})"
+
+        plot_data = MultigroupXSPlotData(
+            x=x,
+            y=y,
+            label=label,
+            plot_type='step',
+            step_where='post',
+            energy_bins=energies,
+            **styling_kwargs,
+        )
+
+        if not uncertainty:
+            return plot_data
+
+        # Build UncertaintyBand from relative errors.
+        # self.errors stores relative errors (fractional) on the raw sensitivity.
+        # Per-lethargy divides by a constant per bin so the relative error is unchanged.
+        rel_err = np.asarray(self.errors, dtype=float)
+        rel_err_extended = np.append(rel_err, rel_err[-1])
+
+        band = UncertaintyBand(
+            x=x,
+            relative_uncertainty=rel_err_extended,
+            sigma=sigma,
+            label=f"{label} ({sigma}\u03c3)" if sigma != 1.0 else None,
+            style=uncertainty_style,
+        )
+
+        return plot_data, band
+
     def __repr__(self):
         """Returns a formatted string representation of the coefficients.
         
@@ -1222,6 +1323,7 @@ class Coefficients:
         add_method(".lethargy", "Get lethargy intervals as property")
         add_method(".values_per_lethargy", "Get sensitivity per lethargy as property")
         add_method(".plot(...)", "Plot sensitivity coefficients")
+        add_method(".to_plot_data(...)", "Get PlotData for use with PlotBuilder")
         add_method(".to_dataframe()", "Export data as pandas DataFrame")
         
         methods_section += "-" * header_width + "\n"
@@ -1230,13 +1332,15 @@ class Coefficients:
         return header + info + data_preview + methods_section
         
     # New helper method to plot onto a provided axis
-    def _plot_on_ax(self, ax, xlim=None):
+    def _plot_on_ax(self, ax, xlim=None, xlog=False):
         """Plot sensitivity coefficients on a given matplotlib axis.
 
         :param ax: The axis to plot on
         :type ax: matplotlib.axes.Axes
-        :param xlim: Optional x-axis limits as (min, max)
+        :param xlim: Optional x-axis limits as (min, max). If None, smart limits are applied.
         :type xlim: tuple, optional
+        :param xlog: Whether to use logarithmic scale for x-axis
+        :type xlog: bool, optional
         """
         # Compute values per lethargy and error ratios
         lp = np.array(self.values_per_lethargy)
@@ -1252,20 +1356,62 @@ class Coefficients:
         ax.set_title(f"MT = {self.reaction}")
         ax.set_xlabel("Energy (MeV)")
         ax.set_ylabel("Sensitivity per lethargy")
+        
+        # Set x-axis scale
+        if xlog:
+            ax.set_xscale('log')
+        
+        # Set x-axis limits
         if xlim is not None:
             ax.set_xlim(xlim)
+        else:
+            # Apply smart limits: exclude consecutive zero bins from edges
+            # but keep one zero bin on each side if possible
+            n_bins = len(lp)
+            
+            # Find first non-zero bin from the left
+            first_nonzero = 0
+            for i in range(n_bins):
+                if lp[i] != 0.0:
+                    first_nonzero = i
+                    break
+            
+            # Find last non-zero bin from the right
+            last_nonzero = n_bins - 1
+            for i in range(n_bins - 1, -1, -1):
+                if lp[i] != 0.0:
+                    last_nonzero = i
+                    break
+            
+            # Set limits to include one zero bin before first non-zero and after last non-zero
+            # (if they exist and we're not excluding everything)
+            if first_nonzero == last_nonzero and lp[first_nonzero] == 0.0:
+                # All values are zero, use full range
+                x_min, x_max = x[0], x[-1]
+            else:
+                # Include one zero bin before first non-zero (if exists)
+                left_idx = max(0, first_nonzero - 1) if first_nonzero > 0 else 0
+                # Include one zero bin after last non-zero (if exists)
+                right_idx = min(n_bins - 1, last_nonzero + 1) if last_nonzero < n_bins - 1 else n_bins - 1
+                
+                x_min = x[left_idx]
+                x_max = x[right_idx + 1]  # +1 because x has n_bins+1 elements (energy boundaries)
+            
+            ax.set_xlim(x_min, x_max)
         
-    def plot(self, ax=None, xlim=None):
+    def plot(self, ax=None, xlim=None, xlog=False):
         """Create a new plot of sensitivity coefficients.
 
         :param ax: Optional existing axis to plot on
         :type ax: matplotlib.axes.Axes, optional
-        :param xlim: Optional x-axis limits as (min, max)
+        :param xlim: Optional x-axis limits as (min, max). If None, smart limits are applied.
         :type xlim: tuple, optional
+        :param xlog: Whether to use logarithmic scale for x-axis
+        :type xlog: bool, optional
         :returns: The axis containing the plot
         :rtype: matplotlib.axes.Axes
         """
         if ax is None:
             fig, ax = plt.subplots(figsize=(5, 4))
-        self._plot_on_ax(ax, xlim=xlim)
+        self._plot_on_ax(ax, xlim=xlim, xlog=xlog)
         return ax

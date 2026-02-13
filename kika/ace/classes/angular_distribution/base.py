@@ -70,66 +70,6 @@ class AngularDistribution:
         except ImportError:
             return None
 
-    def plot(self, energy: float, ax=None, title=None, **kwargs) -> Optional[Tuple]:
-        """
-        Plot the angular distribution for a specific incident energy.
-        
-        Parameters
-        ----------
-        energy : float
-            Incident energy to evaluate the distribution at
-        ax : matplotlib.axes.Axes, optional
-            Axes to plot on, if None a new figure is created
-        title : str, optional
-            Title for the plot, if None a default title is used
-        **kwargs : dict
-            Additional keyword arguments passed to the plot function
-            
-        Returns
-        -------
-        tuple or None
-            Tuple of (fig, ax) or None if matplotlib is not available
-        """
-        try:
-            import matplotlib.pyplot as plt
-            
-            # Get the data to plot
-            df = self.to_dataframe(energy)
-            
-            # Create figure and axes if not provided
-            if ax is None:
-                fig, ax = plt.subplots(figsize=(8, 6))
-            else:
-                fig = ax.figure
-            
-            # Set default parameters if not specified
-            if 'linewidth' not in kwargs:
-                kwargs['linewidth'] = 2
-            if 'color' not in kwargs:
-                kwargs['color'] = 'blue'
-            
-            # Plot the data
-            ax.plot(df['cosine'], df['pdf'], **kwargs)
-            
-            # Set labels and title
-            ax.set_xlabel('Cosine (μ)')
-            ax.set_ylabel('Probability Density')
-            
-            if title is None:
-                mt_value = int(self.mt.value) if hasattr(self.mt, 'value') else int(self.mt)
-                title = f'Angular Distribution for MT={mt_value} at {energy:.4g} MeV'
-            ax.set_title(title)
-            
-            # Set axis limits
-            ax.set_xlim(-1, 1)
-            
-            # Add grid
-            ax.grid(True, alpha=0.3)
-            
-            return fig, ax
-        except ImportError:
-            return None
-    
     def __repr__(self) -> str:
         """
         Returns a user-friendly string representation focusing on raw ACE data.
@@ -200,14 +140,13 @@ class AngularDistribution:
         # Create a section for available methods but keep it minimal
         methods = {
             ".to_dataframe(energy, interpolate=False)": "Get distribution at a specific energy as DataFrame",
-            ".plot(energy)": "Plot the distribution at a specific energy"
         }
-        
+
         methods_section = create_repr_section(
-            "Methods to Visualize Data:", 
-            methods, 
-            total_width=header_width, 
+            "Methods to Access Data:",
+            methods,
+            total_width=header_width,
             method_col_width=property_col_width
         )
-        
+
         return header + description + properties_section + "\n" + methods_section

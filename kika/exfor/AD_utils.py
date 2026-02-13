@@ -1,6 +1,19 @@
 """
 Angular Distribution Analysis Utilities
 
+.. deprecated::
+    This module is deprecated. Please use the new class-based API instead:
+
+    - load_exfor_data() -> use read_exfor() and ExforAngularDistribution
+    - load_all_exfor_data() -> use read_all_exfor()
+    - cos_cm_from_cos_lab() -> use kika.exfor.transforms.cos_cm_from_cos_lab()
+    - transform_lab_to_cm() -> use kika.exfor.transforms.transform_lab_to_cm()
+
+    Example:
+        from kika.exfor import read_exfor
+        exfor = read_exfor('/path/to/file.json')
+        exfor_cm = exfor.convert_to_cm()
+
 This module provides functions for analyzing and plotting angular distributions
 from both ACE nuclear data files and experimental EXFOR data.
 
@@ -9,14 +22,14 @@ Functions:
     - extract_angular_distribution: Extract angular distribution data from ACE files
     - calculate_differential_cross_section: Calculate dσ/dΩ using ACE data
     - cosine_to_angle_degrees, angle_degrees_to_cosine: Convert between μ and θ
-    
+
     EXFOR Data Processing:
     - cos_cm_from_cos_lab: Convert LAB to CM frame cosines
     - jacobian_cm_to_lab: Calculate transformation Jacobian
     - transform_lab_to_cm: Transform LAB to CM frame
     - load_exfor_data: Load and process EXFOR JSON data
     - extract_experiment_info: Extract author and year from metadata
-    
+
     Plotting:
     - plot_angular_distribution: Plot ACE data only
     - plot_combined_angular_distribution: Plot ACE data with multiple experimental datasets
@@ -26,12 +39,23 @@ Date: September 2025
 """
 
 import math
+import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import json
 import re
 from typing import List, Dict, Tuple, Optional, Any
+
+
+def _deprecation_warning(old_name: str, new_name: str, stacklevel: int = 3):
+    """Issue deprecation warning for legacy functions."""
+    warnings.warn(
+        f"{old_name}() is deprecated. Use {new_name} instead. "
+        f"See 'from kika.exfor import read_exfor' for the new API.",
+        DeprecationWarning,
+        stacklevel=stacklevel,
+    )
 
 
 ENERGY_MATCH_ABS_TOL = 1e-6
@@ -250,12 +274,16 @@ def transform_lab_to_cm(mu_L_arr: np.ndarray, dsdo_L_arr: np.ndarray,
 def load_exfor_data(json_file: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Load EXFOR data from JSON file (new format).
-    
+
+    .. deprecated::
+        Use read_exfor() instead for the new class-based API.
+        Example: exfor = read_exfor('/path/to/file.json')
+
     Parameters:
     -----------
     json_file : str
         Path to the JSON file
-        
+
     Returns:
     --------
     df : pd.DataFrame
@@ -263,6 +291,7 @@ def load_exfor_data(json_file: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     meta : dict
         Metadata dictionary
     """
+    _deprecation_warning("load_exfor_data", "read_exfor()")
     with open(json_file, "r") as f:
         obj = json.load(f)
     
@@ -276,7 +305,20 @@ def load_exfor_data(json_file: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         'units': obj.get('units', {}),
         'angle_frame': obj.get('angle_frame', 'Unknown')
     }
-    
+
+    # Extract energy resolution inputs from method section (for TOF experiments)
+    method = obj.get('method', {})
+    energy_res_inputs = method.get('energy_resolution_inputs', {})
+    if energy_res_inputs:
+        distance_info = energy_res_inputs.get('distance', {})
+        time_res_info = energy_res_inputs.get('time_resolution', {})
+        meta['energy_resolution_inputs'] = {
+            'flight_path_m': distance_info.get('value'),
+            'time_resolution_ns': time_res_info.get('value'),
+        }
+    else:
+        meta['energy_resolution_inputs'] = None
+
     # Parse data from all energies
     data_rows = []
     for energy_block in obj.get('energies', []):
@@ -288,7 +330,6 @@ def load_exfor_data(json_file: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
                 'dsig': data_point.get('result', 0.0),
                 'error_stat': data_point.get('error_stat', 0.0),
                 'frame': meta['angle_frame'],
-                'series': data_point.get('series')
             }
             data_rows.append(row)
     
@@ -337,18 +378,26 @@ def load_exfor_data(json_file: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     else:
         print(f"Warning: Unknown angle unit '{angle_unit}'. Expected 'ADEG' or 'COS'. Assuming degrees.")
     
+    # Add filename to metadata for identification
+    import os
+    meta['filename'] = os.path.basename(json_file)
+    
     return df, meta
 
 
 def extract_experiment_info(meta: Dict[str, Any]) -> Tuple[str, str]:
     """
     Extract experiment label with author and year from metadata (new format).
-    
+
+    .. deprecated::
+        Use ExforAngularDistribution.label property instead.
+        Example: exfor = read_exfor('/path/to/file.json'); print(exfor.label)
+
     Parameters:
     -----------
     meta : dict
         Metadata dictionary from EXFOR JSON
-        
+
     Returns:
     --------
     experiment_label : str
@@ -356,6 +405,7 @@ def extract_experiment_info(meta: Dict[str, Any]) -> Tuple[str, str]:
     year : str
         Extracted year
     """
+    _deprecation_warning("extract_experiment_info", "ExforAngularDistribution.label")
     # Extract year from citation
     citation = meta.get('citation', {})
     experiment_year = str(citation.get('year', 'Unknown'))
@@ -377,7 +427,14 @@ def extract_experiment_info(meta: Dict[str, Any]) -> Tuple[str, str]:
         else:
             experiment_label = f"{last_name} ({experiment_year})"
     else:
-        experiment_label = f"Experiment ({experiment_year})"
+        # Use filename if available, otherwise fall back to generic label
+        filename = meta.get('filename', 'Unknown')
+        if filename != 'Unknown':
+            # Remove extension and clean up filename for display
+            base_name = filename.replace('.json', '').replace('_', ' ')
+            experiment_label = f"{base_name} ({experiment_year})"
+        else:
+            experiment_label = f"Experiment ({experiment_year})"
     
     return experiment_label, experiment_year
 
@@ -385,12 +442,16 @@ def extract_experiment_info(meta: Dict[str, Any]) -> Tuple[str, str]:
 def load_all_exfor_data(directory: str) -> Tuple[Dict[float, List[Tuple[pd.DataFrame, Dict[str, Any]]]], List[float]]:
     """
     Load all EXFOR JSON files from a directory and organize by energy.
-    
+
+    .. deprecated::
+        Use read_all_exfor() instead for the new class-based API.
+        Example: energy_dict = read_all_exfor('/path/to/data/')
+
     Parameters:
     -----------
     directory : str
         Path to directory containing EXFOR JSON files
-        
+
     Returns:
     --------
     energy_data : dict
@@ -398,6 +459,7 @@ def load_all_exfor_data(directory: str) -> Tuple[Dict[float, List[Tuple[pd.DataF
     sorted_energies : list
         Sorted list of unique energies found
     """
+    _deprecation_warning("load_all_exfor_data", "read_all_exfor()")
     import os
     import glob
     
@@ -666,10 +728,10 @@ def plot_combined_angular_distribution(ace_data, energy: float, exfor_files: Lis
                                      m_proj_u: float = 1.008665, m_targ_u: float = 55.93494,
                                      mt: int = 2, title: Optional[str] = None,
                                      figsize: Tuple[int, int] = (12, 8), log_scale: bool = False,
-                                     frame: str = 'CM', series_filter: Optional[List[str]] = None):
+                                     frame: str = 'CM'):
     """
     Plot differential cross section with multiple experimental datasets.
-    
+
     Parameters:
     -----------
     ace_data : ACE object
@@ -692,9 +754,7 @@ def plot_combined_angular_distribution(ace_data, energy: float, exfor_files: Lis
         Whether to use log scale for y-axis
     frame : str
         'LAB' or 'CM' - which frame to plot in
-    series_filter : list of str, optional
-        List of series names to include (default: exclude 'difference' series)
-        
+
     Returns:
     --------
     fig, ax : matplotlib figure and axes objects
@@ -722,21 +782,8 @@ def plot_combined_angular_distribution(ace_data, energy: float, exfor_files: Lis
                 df, meta = load_exfor_data(exfor_file)
                 experiment_label, year = extract_experiment_info(meta)
                 
-                # Filter series if specified
-                if series_filter is None:
-                    # Default: exclude difference series when series data exists
-                    if "series" in df.columns:
-                        df_filtered = df[~df["series"].str.contains("difference", case=False, na=False)].copy()
-                    else:
-                        df_filtered = df.copy()
-                else:
-                    if "series" in df.columns:
-                        df_filtered = df[df["series"].isin(series_filter)].copy()
-                    else:
-                        print(f"Warning: series filter requested but no series data in {exfor_file}. Using all data.")
-                        df_filtered = df.copy()
-
                 # Filter data for the specific energy (within tolerance)
+                df_filtered = df.copy()
                 energy_tolerance = 0.1  # MeV
                 df_energy = df_filtered[abs(df_filtered['energy'] - energy) <= energy_tolerance].copy()
                 
@@ -935,15 +982,15 @@ def plot_individual_energy_comparisons(ace_data, exfor_directory: str, m_proj_u:
     return figures
 
 
-def plot_combined_angular_distribution_multi_ace(ace_dict: Dict[str, Any], energy: float, 
+def plot_combined_angular_distribution_multi_ace(ace_dict: Dict[str, Any], energy: float,
                                                 exfor_files: List[str] = None,
                                                 m_proj_u: float = 1.008665, m_targ_u: float = 55.93494,
                                                 mt: int = 2, title: Optional[str] = None,
                                                 figsize: Tuple[int, int] = (12, 8), log_scale: bool = False,
-                                                frame: str = 'CM', series_filter: Optional[List[str]] = None):
+                                                frame: str = 'CM'):
     """
     Plot differential cross section with multiple ACE datasets and experimental data.
-    
+
     Parameters:
     -----------
     ace_dict : dict
@@ -966,9 +1013,7 @@ def plot_combined_angular_distribution_multi_ace(ace_dict: Dict[str, Any], energ
         Whether to use log scale for y-axis
     frame : str
         Reference frame ('CM' or 'LAB')
-    series_filter : list of str, optional
-        Filter experimental series by these strings
-        
+
     Returns:
     --------
     fig, ax : matplotlib figure and axes objects
@@ -1006,12 +1051,9 @@ def plot_combined_angular_distribution_multi_ace(ace_dict: Dict[str, Any], energ
                 
                 if df_energy.empty:
                     continue
-                
-                # Apply series filter if provided
+
                 exp_label, year = extract_experiment_info(meta_exp)
-                if series_filter and not any(f in exp_label for f in series_filter):
-                    continue
-                
+
                 # Get data
                 angles = df_energy["angle"].values
                 dsig = df_energy["dsig"].values

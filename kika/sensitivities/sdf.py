@@ -1,9 +1,11 @@
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Union
 import os
+import numpy as np
 from kika._constants import MT_TO_REACTION, ATOMIC_NUMBER_TO_SYMBOL
 from kika.sensitivities.sensitivity import SensitivityData
 from kika.energy_grids.utils import _identify_energy_grid
+from kika.plotting import MultigroupXSPlotData, UncertaintyBand
 
 
 @dataclass
@@ -105,6 +107,93 @@ class SDFReactionData:
                 data_preview += f"  {i+1:<5d}    {self.sensitivity[i]:14.6e}    {self.error[i]:12.6e}\n"
         
         return header + stats + data_preview
+
+    def to_plot_data(
+        self,
+        pert_energies,
+        per_lethargy: bool = True,
+        uncertainty: bool = True,
+        sigma: float = 1.0,
+        uncertainty_style: str = 'errorbar',
+        label: str = None,
+        **styling_kwargs
+    ) -> Union['MultigroupXSPlotData', Tuple['MultigroupXSPlotData', 'UncertaintyBand']]:
+        """Convert sensitivity data for this reaction into PlotData objects.
+
+        Returns a :class:`~kika.plotting.MultigroupXSPlotData` (step plot) and,
+        optionally, an :class:`~kika.plotting.UncertaintyBand` suitable for
+        :class:`~kika.plotting.PlotBuilder`.
+
+        :param pert_energies: Energy bin boundaries (n+1 values, ascending order in MeV).
+        :type pert_energies: array-like
+        :param per_lethargy: If True, normalise sensitivity values by the lethargy
+            width of each bin (matches ``Coefficients.plot()`` behaviour).
+        :type per_lethargy: bool
+        :param uncertainty: If True, return an ``UncertaintyBand`` alongside the
+            nominal data.
+        :type uncertainty: bool
+        :param sigma: Sigma multiplier for the uncertainty band.
+        :type sigma: float
+        :param uncertainty_style: Rendering style for the uncertainty band:
+            ``'errorbar'`` (default for sensitivity data) or ``'band'``.
+        :type uncertainty_style: str
+        :param label: Legend label. Auto-generated as ``"<nuclide> <reaction_name>"``
+            (e.g. ``"Fe-56 (n,el)"``) when *None*.
+        :type label: str, optional
+        :param styling_kwargs: Forwarded to ``MultigroupXSPlotData``
+            (``color``, ``linestyle``, ``linewidth``, etc.).
+        :returns: ``MultigroupXSPlotData`` when *uncertainty=False*,
+            or ``(MultigroupXSPlotData, UncertaintyBand)`` when *uncertainty=True*.
+        :rtype: MultigroupXSPlotData or Tuple[MultigroupXSPlotData, UncertaintyBand]
+        """
+        energies = np.asarray(pert_energies, dtype=float)
+        sens = np.asarray(self.sensitivity, dtype=float)
+        n = len(sens)
+
+        if per_lethargy:
+            lethargy = np.log(energies[1:] / energies[:-1])
+            y_vals = sens / lethargy
+        else:
+            y_vals = sens.copy()
+
+        # Step plot: n+1 x-points, repeat last y value
+        x = energies
+        y = np.append(y_vals, y_vals[-1])
+
+        if label is None:
+            label = f"{self.nuclide} {self.reaction_name}"
+
+        plot_data = MultigroupXSPlotData(
+            x=x,
+            y=y,
+            label=label,
+            plot_type='step',
+            step_where='post',
+            zaid=self.zaid,
+            mt=self.mt,
+            energy_bins=energies,
+            **styling_kwargs,
+        )
+
+        if not uncertainty:
+            return plot_data
+
+        # Build UncertaintyBand from relative errors.
+        # self.error stores relative errors (fractional) on the raw sensitivity.
+        # We need relative errors on the plotted y values. Since per-lethargy
+        # divides by a constant per bin, the *relative* error is unchanged.
+        rel_err = np.asarray(self.error, dtype=float)
+        rel_err_extended = np.append(rel_err, rel_err[-1])
+
+        band = UncertaintyBand(
+            x=x,
+            relative_uncertainty=rel_err_extended,
+            sigma=sigma,
+            label=f"{label} ({sigma}\u03c3)" if sigma != 1.0 else None,
+            style=uncertainty_style,
+        )
+
+        return plot_data, band
 
 
 @dataclass
@@ -221,10 +310,230 @@ class SDFData:
         
         # Footer with available methods
         footer = "\n\nAvailable methods:\n"
+        footer += "- .to_plot_data() - Get PlotData for use with PlotBuilder\n"
         footer += "- .write_file() - Write SDF data to a file\n"
         footer += "- .group_inelastic_reactions() - Group MT 51-91 into MT 4\n"
-        
+        footer += "- SDFData.merge() - Merge multiple SDF objects\n"
+        footer += "- SDFData.can_merge() - Check if SDF objects can be merged\n"
+
         return header + stats + energy_preview + data_summary + footer
+
+    def to_plot_data(
+        self,
+        index: int = None,
+        zaid: int = None,
+        mt: int = None,
+        per_lethargy: bool = True,
+        uncertainty: bool = True,
+        sigma: float = 1.0,
+        uncertainty_style: str = 'errorbar',
+        label: str = None,
+        **styling_kwargs
+    ) -> Union['MultigroupXSPlotData', Tuple['MultigroupXSPlotData', 'UncertaintyBand']]:
+        """Convert a reaction's sensitivity data into PlotData objects.
+
+        Look up a reaction either by *index* into :attr:`data` or by
+        *(zaid, mt)* pair, then delegate to
+        :meth:`SDFReactionData.to_plot_data`.
+
+        :param index: Direct index into ``self.data``.
+        :type index: int, optional
+        :param zaid: ZAID of the nuclide (requires *mt* as well).
+        :type zaid: int, optional
+        :param mt: MT reaction number (requires *zaid* as well).
+        :type mt: int, optional
+        :param per_lethargy: Normalise by lethargy width (default ``True``).
+        :type per_lethargy: bool
+        :param uncertainty: Include an ``UncertaintyBand`` (default ``True``).
+        :type uncertainty: bool
+        :param sigma: Sigma multiplier for the uncertainty band.
+        :type sigma: float
+        :param uncertainty_style: Rendering style for the uncertainty band:
+            ``'errorbar'`` (default for sensitivity data) or ``'band'``.
+        :type uncertainty_style: str
+        :param label: Legend label (auto-generated if *None*).
+        :type label: str, optional
+        :param styling_kwargs: Forwarded to ``MultigroupXSPlotData``.
+        :returns: See :meth:`SDFReactionData.to_plot_data`.
+        :rtype: MultigroupXSPlotData or Tuple[MultigroupXSPlotData, UncertaintyBand]
+        :raises ValueError: If neither *index* nor *(zaid, mt)* is given, or if
+            the requested reaction is not found.
+        """
+        if index is not None:
+            if index < 0 or index >= len(self.data):
+                raise ValueError(
+                    f"index {index} out of range (0..{len(self.data) - 1})"
+                )
+            reaction = self.data[index]
+        elif zaid is not None and mt is not None:
+            reaction = None
+            for rd in self.data:
+                if rd.zaid == zaid and rd.mt == mt:
+                    reaction = rd
+                    break
+            if reaction is None:
+                raise ValueError(
+                    f"No reaction found with ZAID={zaid}, MT={mt}"
+                )
+        else:
+            raise ValueError(
+                "Provide either 'index' or both 'zaid' and 'mt'"
+            )
+
+        return reaction.to_plot_data(
+            self.pert_energies,
+            per_lethargy=per_lethargy,
+            uncertainty=uncertainty,
+            sigma=sigma,
+            uncertainty_style=uncertainty_style,
+            label=label,
+            **styling_kwargs,
+        )
+
+    @classmethod
+    def merge(cls, sdf_list: List['SDFData'],
+              title: Optional[str] = None,
+              energy: Optional[str] = None,
+              r0: Optional[float] = None,
+              e0: Optional[float] = None) -> 'SDFData':
+        """Merge multiple SDFData objects into a single one.
+
+        All SDFs must share the same perturbation energy grid.  The merged
+        object contains every ``SDFReactionData`` entry from the inputs;
+        duplicate ``(zaid, mt)`` pairs are not allowed.
+
+        :param sdf_list: List of SDFData objects to combine.
+        :type sdf_list: List[SDFData]
+        :param title: Override title. If *None*, uses the common title when all
+            inputs match, otherwise joins distinct titles with ``" + "``.
+        :type title: Optional[str]
+        :param energy: Override energy label. If *None*, uses the common label
+            when all inputs match, otherwise raises ``ValueError``.
+        :type energy: Optional[str]
+        :param r0: Override response value. If *None*, uses the common value
+            when all inputs agree, otherwise raises ``ValueError``.
+        :type r0: Optional[float]
+        :param e0: Override relative error. If *None*, uses the common value
+            when all inputs agree, otherwise raises ``ValueError``.
+        :type e0: Optional[float]
+        :returns: A new merged SDFData instance.
+        :rtype: SDFData
+        :raises ValueError: If *sdf_list* is empty, energy grids differ,
+            r0/e0 values conflict (and none was given), energy labels differ
+            (and none was given), or duplicate (zaid, mt) pairs are found.
+        """
+        if not sdf_list:
+            raise ValueError("Cannot merge an empty list of SDFData objects")
+
+        # --- energy grid ---
+        ref_energies = sdf_list[0].pert_energies
+        for i, sdf in enumerate(sdf_list[1:], 1):
+            if sdf.pert_energies != ref_energies:
+                raise ValueError(
+                    f"Energy grids do not match: SDF 0 ('{sdf_list[0].title}') has "
+                    f"{len(ref_energies)} boundaries, SDF {i} ('{sdf.title}') has "
+                    f"{len(sdf.pert_energies)} boundaries"
+                )
+
+        # --- r0 / e0 ---
+        if r0 is None:
+            r0_values = {s.r0 for s in sdf_list if s.r0 is not None}
+            if len(r0_values) > 1:
+                raise ValueError(
+                    f"SDFs have different r0 values {r0_values}. "
+                    f"Provide the 'r0' parameter explicitly."
+                )
+            r0 = r0_values.pop() if r0_values else None
+
+        if e0 is None:
+            e0_values = {s.e0 for s in sdf_list if s.e0 is not None}
+            if len(e0_values) > 1:
+                raise ValueError(
+                    f"SDFs have different e0 values {e0_values}. "
+                    f"Provide the 'e0' parameter explicitly."
+                )
+            e0 = e0_values.pop() if e0_values else None
+
+        # --- energy label ---
+        if energy is None:
+            labels = {s.energy for s in sdf_list}
+            if len(labels) == 1:
+                energy = labels.pop()
+            else:
+                raise ValueError(
+                    f"SDFs have different energy labels {labels}. "
+                    f"Provide the 'energy' parameter explicitly."
+                )
+
+        # --- title ---
+        if title is None:
+            titles = list(dict.fromkeys(s.title for s in sdf_list))  # unique, order-preserving
+            title = " + ".join(titles)
+
+        # --- duplicate check & collect data ---
+        seen = {}
+        combined_data = []
+        for i, sdf in enumerate(sdf_list):
+            for rd in sdf.data:
+                key = (rd.zaid, rd.mt)
+                if key in seen:
+                    raise ValueError(
+                        f"Duplicate reaction: {rd.nuclide} {rd.reaction_name} "
+                        f"(ZAID={rd.zaid}, MT={rd.mt}) appears in SDF {seen[key]} "
+                        f"and SDF {i} ('{sdf.title}')"
+                    )
+                seen[key] = i
+                combined_data.append(rd)
+
+        return cls(
+            title=title,
+            energy=energy,
+            pert_energies=ref_energies,
+            r0=r0,
+            e0=e0,
+            data=combined_data,
+        )
+
+    @classmethod
+    def can_merge(cls, sdf_list: List['SDFData'],
+                  energy: Optional[str] = None,
+                  r0: Optional[float] = None,
+                  e0: Optional[float] = None) -> Tuple[bool, str]:
+        """Check whether a list of SDFData objects can be merged.
+
+        Runs the same validation as :meth:`merge` but never raises.
+        Pass the same override parameters you would pass to :meth:`merge`
+        to check whether the merge would succeed with those overrides.
+
+        :param sdf_list: List of SDFData objects to check.
+        :type sdf_list: List[SDFData]
+        :param energy: Override energy label (same as in :meth:`merge`).
+        :type energy: Optional[str]
+        :param r0: Override response value (same as in :meth:`merge`).
+        :type r0: Optional[float]
+        :param e0: Override relative error (same as in :meth:`merge`).
+        :type e0: Optional[float]
+        :returns: ``(True, "")`` if the merge would succeed, or
+            ``(False, reason)`` with a human-readable explanation otherwise.
+        :rtype: Tuple[bool, str]
+        """
+        try:
+            cls.merge(sdf_list, energy=energy, r0=r0, e0=e0)
+            return True, ""
+        except ValueError as exc:
+            return False, str(exc)
+
+    def __add__(self, other: 'SDFData') -> 'SDFData':
+        """Merge two SDFData objects using the ``+`` operator.
+
+        :param other: Another SDFData object.
+        :type other: SDFData
+        :returns: A new merged SDFData instance.
+        :rtype: SDFData
+        """
+        if not isinstance(other, SDFData):
+            return NotImplemented
+        return SDFData.merge([self, other])
 
     def write_file(self, output_dir: Optional[str] = None):
         """
@@ -254,7 +563,7 @@ class SDFData:
         # Sort the data by ZAID and then by MT number
         sorted_data = sorted(self.data, key=lambda x: (x.zaid, x.mt))
         
-        with open(filepath, 'w') as file:
+        with open(filepath, 'w', encoding='utf-8') as file:
             # Write header
             file.write(f"{self.title} MCNP to SCALE sdf {ngroups}gr\n")
             file.write(f"       {ngroups} number of neutron groups\n")

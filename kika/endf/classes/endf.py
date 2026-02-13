@@ -182,11 +182,11 @@ class ENDF:
                 isotope_id = self.zaid if self.zaid is not None else int(mf34_mt._za)
                 
                 # Prepare kwargs for MF34CovMat.to_plot_data - remove parameters we're setting explicitly
-                styling_kwargs = {k: v for k, v in kwargs.items() if k not in ['order', 'mt', 'isotope', 'uncertainty_type']}
+                styling_kwargs = {k: v for k, v in kwargs.items() if k not in ['order', 'mt', 'nuclide', 'uncertainty_type']}
                 
-                # Get uncertainty data from MF34 (returns LegendreUncertaintyPlotData on native grid)
-                unc_native = mf34_covmat.to_plot_data(
-                    isotope=isotope_id,
+                # Get uncertainty data from MF34 (returns tuple: (None, unc_data))
+                _, unc_native = mf34_covmat.to_plot_data(
+                    nuclide=isotope_id,
                     mt=mt,
                     order=order,
                     uncertainty_type='relative',

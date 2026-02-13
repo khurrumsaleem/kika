@@ -108,6 +108,12 @@ def _get_logger():
     return _logger
 
 
+def _set_logger(logger):
+    """Set the global logger instance."""
+    global _logger
+    _logger = logger
+
+
 def load_covariance(path):
     """
     Load covariance matrix from file, trying different formats.

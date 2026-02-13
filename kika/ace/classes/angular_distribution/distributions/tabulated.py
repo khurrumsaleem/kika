@@ -178,8 +178,8 @@ class TabulatedAngularDistribution(AngularDistribution):
         # Generate PDF values based on interpolation type
         if interpolate:
             pdf_values_interp = np.zeros_like(cosines)
-            
-            if interp_type == 1:  # Histogram
+
+            if interp_type == 0:  # Histogram (JJ=0 per ACE Table 20)
                 # For histogram, each point gets the value of the left edge of its bin
                 for i, mu in enumerate(cosines):
                     bin_idx = np.searchsorted(cosine_values, mu)
@@ -187,8 +187,8 @@ class TabulatedAngularDistribution(AngularDistribution):
                         pdf_values_interp[i] = pdf_values[0]
                     else:
                         pdf_values_interp[i] = pdf_values[bin_idx-1]
-            else:  # Linear-linear (type 2) or fallback
-                # Use linear interpolation (current implementation)
+            else:  # Linear-linear (JJ=1 per ACE Table 20)
+                # Use linear interpolation between tabulated points
                 pdf_values_interp = np.interp(cosines, cosine_values, pdf_values, left=0.0, right=0.0)
         
         return pd.DataFrame({
@@ -221,15 +221,15 @@ class TabulatedAngularDistribution(AngularDistribution):
             f"incident energy points. The data is organized as follows:\n\n"
             f"1. Energy Grid: A set of incident neutron energies (E₁, E₂, ..., Eₙ)\n"
             f"2. For each energy point, the distribution includes:\n"
-            f"   a. Interpolation flag (1=histogram, 2=linear-linear)\n"
+            f"   a. Interpolation flag (0=histogram, 1=linear-linear per ACE Table 20)\n"
             f"   b. Set of cosine values (μ) ranging from -1 to 1\n"
             f"   c. PDF values (probability density function) for each cosine\n"
             f"   d. CDF values (cumulative distribution function) for each cosine\n\n"
             f"INTERPOLATION METHODS:\n"
             f"- Between incident energy points: Linear interpolation of PDF values\n"
             f"- Within a cosine grid (μ values):\n"
-            f"  * Histogram (flag=1): PDF value is constant within each cosine bin\n"
-            f"  * Linear-linear (flag=2): Linear interpolation between cosine points\n\n"
+            f"  * Histogram (flag=0): PDF value is constant within each cosine bin\n"
+            f"  * Linear-linear (flag=1): Linear interpolation between cosine points\n\n"
             f"CALCULATION EXAMPLE:\n"
             f"To calculate the PDF at incident energy E and scattering cosine μ:\n"
             f"1. Find bounding energy points: E₁ ≤ E ≤ E₂\n"
@@ -263,8 +263,8 @@ class TabulatedAngularDistribution(AngularDistribution):
         if hasattr(self, "interpolation") and self.interpolation:
             interp_types = set(self.interpolation)
             interp_desc = {
-                1: "Histogram",
-                2: "Linear-Linear"
+                0: "Histogram",
+                1: "Linear-Linear"
             }
             interp_str = ", ".join(interp_desc.get(i, f"Type {i}") for i in interp_types)
             
@@ -303,14 +303,13 @@ class TabulatedAngularDistribution(AngularDistribution):
         # Create a section for available methods
         methods = {
             ".to_dataframe(energy, interpolate=False)": "Get distribution at a specific energy as DataFrame",
-            ".plot(energy)": "Plot the distribution at a specific energy"
         }
-        
+
         methods_section = create_repr_section(
-            "Methods to Visualize Data:", 
-            methods, 
-            total_width=header_width, 
+            "Methods to Access Data:",
+            methods,
+            total_width=header_width,
             method_col_width=property_col_width
         )
-        
+
         return header + description + properties_section + "\n" + methods_section

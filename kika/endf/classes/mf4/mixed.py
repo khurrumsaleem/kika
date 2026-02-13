@@ -41,7 +41,7 @@ class MF4MTMixed(MF4MT):
     def legendre_energies(self) -> List[float]:
         """Energy grid for Legendre coefficients"""
         return self._energies
-    
+
     @property
     def tabulated_energies(self) -> List[float]:
         """Energy grid for tabulated angular distributions"""
@@ -152,9 +152,122 @@ class MF4MTMixed(MF4MT):
         and tabulated distributions at high energies. This method uses only the Legendre
         portion. The energy range plotted will correspond to the Legendre energy grid.
         """
-        from .plot_utils import create_legendre_coeff_plot_data
-        return create_legendre_coeff_plot_data(self, order=order, label=label, **styling_kwargs)
+        from kika.plotting import LegendreCoeffPlotData
+        
+        # Get energy grid from Legendre portion of mixed representation
+        energies = np.array(self._energies, dtype=float)
+        
+        if len(energies) == 0:
+            raise ValueError("No Legendre data available in mixed representation")
+        
+        # Extract Legendre coefficients at all energy points using the built-in method
+        coeffs_dict = self.extract_legendre_coefficients(
+            energy=energies,
+            max_legendre_order=order,
+            trim=False,  # Don't trim for plotting
+            out_of_range="zero"
+        )
+        
+        # Get the coefficient values for the requested order
+        coeff_values = coeffs_dict[order]
+        
+        # Get isotope information
+        isotope = getattr(self, 'isotope', None)
+        if isotope is None and hasattr(self, 'zaid'):
+            isotope = str(self.zaid)
+        
+        mt = getattr(self, 'number', None)
+        
+        # Auto-generate label if not provided
+        if label is None:
+            label = f'Mixed L={order}'
+            if isotope:
+                label = f'{isotope} {label}'
+        
+        return LegendreCoeffPlotData(
+            x=energies,
+            y=coeff_values,
+            order=order,
+            isotope=isotope,
+            mt=mt,
+            energy_range=(energies.min(), energies.max()),
+            label=label,
+            **styling_kwargs
+        )
 
+    def to_bulk_plot_data(
+        self,
+        max_order: int = 12,
+        quad_order: int = 64
+    ) -> Dict[str, Union[List[float], Dict[int, List[float]], int, str]]:
+        """
+        Extract ALL Legendre orders at once for bulk loading.
+
+        For mixed representation (LTT=3), this uses the Legendre portion's energy grid
+        and extracts coefficients using the built-in method that handles both branches.
+
+        Parameters
+        ----------
+        max_order : int, optional
+            Maximum Legendre order to compute (default: 12)
+        quad_order : int, optional
+            Quadrature order for projecting tabulated portions (default: 64)
+
+        Returns
+        -------
+        dict
+            Dictionary containing:
+            - 'energies': list of energy values (eV)
+            - 'coefficients_by_order': dict mapping order (int) to list of coefficients
+            - 'max_order': maximum order extracted
+            - 'isotope': isotope identifier (if available)
+            - 'mt': MT reaction number
+        """
+        # Use the Legendre energy grid as the primary grid
+        energies = np.array(self._energies, dtype=float) if self._energies else np.array([], dtype=float)
+
+        if len(energies) == 0:
+            # Fall back to tabulated energies if no Legendre energies
+            energies = np.array(self._tabulated_energies, dtype=float) if self._tabulated_energies else np.array([], dtype=float)
+
+        if len(energies) == 0:
+            return {
+                'energies': [],
+                'coefficients_by_order': {},
+                'max_order': 0,
+                'isotope': getattr(self, 'isotope', None),
+                'mt': getattr(self, 'number', None),
+            }
+
+        # Extract all Legendre coefficients using the built-in method
+        # This handles both Legendre and tabulated portions automatically
+        coeffs_dict = self.extract_legendre_coefficients(
+            energy=energies,
+            max_legendre_order=max_order,
+            trim=False,  # Don't trim - we want all orders
+            quad_order=quad_order,
+            out_of_range="zero"
+        )
+
+        # Convert to the expected format
+        coefficients_by_order: Dict[int, List[float]] = {}
+        for order in range(max_order + 1):
+            if order in coeffs_dict:
+                vals = coeffs_dict[order]
+                if isinstance(vals, np.ndarray):
+                    coefficients_by_order[order] = vals.tolist()
+                else:
+                    coefficients_by_order[order] = [float(vals)] * len(energies)
+            else:
+                coefficients_by_order[order] = [0.0] * len(energies)
+
+        return {
+            'energies': energies.tolist(),
+            'coefficients_by_order': coefficients_by_order,
+            'max_order': max_order,
+            'isotope': getattr(self, 'isotope', None),
+            'mt': getattr(self, 'number', None),
+        }
 
     # --- CORE: extract coefficients with auto-trim and ENDF interpolation ---
 

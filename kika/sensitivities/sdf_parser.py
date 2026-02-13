@@ -49,7 +49,7 @@ HEADER_RE = re.compile(r"^(?P<title>.+) MCNP to SCALE sdf (?P<ngroups>\d+)gr\s*$
 NGROUP_LINE_RE = re.compile(r"^\s*(?P<ngroups>\d+) number of neutron groups\s*$")
 NPROF_LINE_RE = re.compile(r"^\s*(?P<nprofiles>\d+)\s+ number of sensitivity profiles\s+(?P<nprofiles2>\d+) are region integrated\s*$")
 R0_LINE_RE = re.compile(r"^\s*(?P<r0>[+-]?\d?\.\d+E[+-]\d+) \+/-\s+(?P<e0>[+-]?\d?\.\d+E[+-]\d+)\s*$")
-REACTION_HEADER_RE = re.compile(r"^(?P<form>.{13})(?P<reac>.{17})(?P<zaid>\d{5})(?P<mt>\s*\d+)\s*$")
+REACTION_HEADER_RE = re.compile(r"^(?P<form>.{13})(?P<reac>.{17})\s*(?P<zaid>\d+)\s+(?P<mt>\d+)\s*$")
 # The second and third fixed lines inside a reaction block are literal
 FIXED_LINE_1 = "      0      0"
 FIXED_LINE_2 = "  0.000000E+00  0.000000E+00      0      0"
@@ -73,7 +73,7 @@ def read_sdf(path: str) -> SDFData:
     if not p.is_file():
         raise FileNotFoundError(path)
 
-    with p.open("r") as f:
+    with p.open("r", encoding="utf-8") as f:
         lines = [ln.rstrip("\n") for ln in f]
 
     idx = 0

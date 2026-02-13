@@ -1,10 +1,16 @@
-from typing import List, Dict, Optional, Set, Tuple, Union, Any
 from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
-from kika._utils import create_repr_section # Import the utility function
+from kika._utils import create_repr_section
+
+if TYPE_CHECKING:
+    from pathlib import Path
+    from kika.plotting.plot_data import MF34HeatmapData, LegendreUncertaintyPlotData
+
 
 @dataclass
 class MF34CovMat: 
@@ -30,13 +36,17 @@ class MF34CovMat:
     matrices : List[np.ndarray]
         List of covariance matrices
     is_relative : List[bool]
-        List of flags indicating if matrix values are relative (True) or absolute (False)
-        False only when LB=0 is present
+        List of flags indicating if matrix values are relative (True) or absolute (False).
+        False only when LB=0 is present. For ENDF-normalized Legendre coefficients
+        a_l = (c_l/c0)/(2l+1), the covariance values are inherently relative since
+        the coefficients are already normalized by the total cross section.
     frame : List[str]
         List of reference frames for each matrix:
         - "same-as-MF4" when LCT=0
         - "LAB" when LCT=1  
         - "CM" when LCT=2
+    energy_unit : str
+        Energy unit for energy_grids: 'eV' (default) or 'MeV'
     """
     isotope_rows: List[int] = field(default_factory=list)
     reaction_rows: List[int] = field(default_factory=list)
@@ -50,6 +60,7 @@ class MF34CovMat:
     # Metadata fields
     is_relative: List[bool] = field(default_factory=list)
     frame: List[str] = field(default_factory=list)
+    energy_unit: str = 'eV'  # Energy unit: 'eV' or 'MeV'
 
     # ------------------------------------------------------------------
     # Basic methods
@@ -107,6 +118,68 @@ class MF34CovMat:
         self.is_relative.append(is_relative)
         self.frame.append(frame)
         
+    @classmethod
+    def from_endf(cls, file_path: Union[str, 'Path'], energy_unit: str = 'eV') -> "MF34CovMat":
+        """
+        Create an MF34CovMat instance from an ENDF file containing MF34 data.
+        
+        This is a convenience class method that reads an ENDF file, extracts MF34
+        (angular distribution covariance) data, and converts it to an MF34CovMat object.
+        
+        Parameters
+        ----------
+        file_path : str or Path
+            Path to the ENDF file containing MF34 data
+        energy_unit : str, optional
+            Energy unit for the energy grid: 'eV' (default) or 'MeV'
+            
+        Returns
+        -------
+        MF34CovMat
+            MF34CovMat instance with angular distribution covariance data
+            
+        Raises
+        ------
+        FileNotFoundError
+            If the file does not exist
+        ValueError
+            If the file does not contain MF34 data
+            
+        Examples
+        --------
+        >>> mf34_covmat = MF34CovMat.from_endf('path/to/endf_file.txt')
+        >>> print(f"Loaded {mf34_covmat.num_matrices} angular covariance matrices")
+        >>> # Or specify MeV if needed
+        >>> mf34_covmat_mev = MF34CovMat.from_endf('path/to/file.txt', energy_unit='MeV')
+        
+        Notes
+        -----
+        This method internally:
+        1. Reads the ENDF file using read_endf()
+        2. Extracts MF34 data
+        3. Converts to MF34CovMat using the to_ang_covmat() method
+        
+        See Also
+        --------
+        read_endf : Function to read ENDF files
+        """
+        from pathlib import Path
+        from kika.endf import read_endf
+        
+        # Convert to Path object for consistent handling
+        file_path = Path(file_path)
+        
+        # Read the ENDF file, requesting MF34
+        endf = read_endf(file_path, mf_numbers=34)
+        
+        # Get MF34 data
+        mf34 = endf.get_file(34)
+        
+        if mf34 is None:
+            raise ValueError(f"No MF34 (angular distribution covariance) data found in file: {file_path}")
+        
+        # Convert MF34 to MF34CovMat
+        return mf34.to_ang_covmat(energy_unit=energy_unit)
 
     # ------------------------------------------------------------------
     # User-friendly methods
@@ -175,26 +248,67 @@ class MF34CovMat:
 
     @property
     def num_matrices(self) -> int:
-        """Number of matrices stored."""
+        """
+        Get the number of covariance matrices stored.
+        
+        Returns
+        -------
+        int
+            Number of matrices
+        """
         return len(self.matrices)
     
     @property
     def isotopes(self) -> Set[int]:
-        """Set of unique isotope IDs."""
+        """
+        Get the set of unique isotope IDs in the covariance matrices.
+        
+        Returns
+        -------
+        Set[int]
+            Sorted list of unique isotope IDs
+        """
         return sorted(set(self.isotope_rows + self.isotope_cols))
     
     @property
     def reactions(self) -> Set[int]:
-        """Set of unique reaction MT numbers."""
+        """
+        Get the set of unique reaction MT numbers in the covariance matrices.
+        
+        Returns
+        -------
+        Set[int]
+            Sorted list of unique reaction MT numbers
+        """
         return sorted(set(self.reaction_rows + self.reaction_cols))
     
     @property
     def legendre_indices(self) -> Set[int]:
-        """Set of unique Legendre coefficient indices."""
+        """
+        Get the set of unique Legendre coefficient indices in the covariance matrices.
+        
+        Returns
+        -------
+        Set[int]
+            Sorted list of unique Legendre coefficient indices
+        """
         return sorted(set(self.l_rows + self.l_cols))
     
     @property
     def covariance_matrix(self) -> np.ndarray:
+        """
+        Return the full covariance matrix.
+        
+        Constructs the complete covariance matrix by assembling all sub-matrices
+        with proper energy grid alignment using union grids.
+        
+        Returns
+        -------
+        np.ndarray
+            Full covariance matrix of shape (N*G_max, N*G_max) where N is the
+            number of unique (isotope, reaction, L) triplets and G_max is the
+            maximum number of energy bins across all triplets
+        """
         param_triplets = self._get_param_triplets()
         idx_map = {p: i for i, p in enumerate(param_triplets)}
         unions = getattr(self, "_union_grids", None) or self.compute_union_energy_grids()
@@ -202,7 +316,7 @@ class MF34CovMat:
         Gmap = {t: len(unions[t]) - 1 for t in param_triplets}
         max_G = max(Gmap.values()) if Gmap else 0
         N = len(param_triplets) * max_G
-        full = np.zeros((N, N), dtype=float)
+        full = np.full((N, N), np.nan, dtype=float)
 
         for ir, rr, lr, ic, rc, lc, matrix, grid in zip(
             self.isotope_rows, self.reaction_rows, self.l_rows,
@@ -315,15 +429,341 @@ class MF34CovMat:
         
         return pd.DataFrame(data)
     
+    def to_heatmap_data(
+        self,
+        nuclide: Union[int, str],
+        mt: int,
+        legendre_coeffs: Union[int, List[int], Tuple[int, int]],
+        *,
+        matrix_type: str = 'corr',
+        scale: str = 'log',
+        energy_range: Optional[Tuple[float, float]] = None,
+        **kwargs
+    ) -> 'MF34HeatmapData':
+        """
+        Prepare MF34 covariance heatmap data for PlotBuilder rendering.
+        
+        This method handles the complex MF34 matrix structure including per-Legendre
+        energy grids and prepares data for visualization.
+        
+        Parameters
+        ----------
+        nuclide : int or str
+            Isotope identifier. Can be either:
+            - Integer ZAID (e.g., 92235 for U-235)
+            - Element-mass string (e.g., 'U235', 'Fe56')
+        mt : int
+            MT reaction number
+        legendre_coeffs : int, list of int, or tuple of (row_l, col_l)
+            Legendre coefficient(s). Can be:
+            - Single int: diagonal block for that L
+            - List of ints: diagonal blocks for those L values
+            - Tuple of (row_l, col_l): off-diagonal block between row and column L
+        matrix_type : str, default 'corr'
+            Type of matrix: 'corr'/'correlation' for correlation matrix,
+            or 'cov'/'covariance' for covariance matrix
+        scale : str, default 'log'
+            Energy axis scale: 'log'/'logarithmic' or 'lin'/'linear'
+        energy_range : tuple of float, optional
+            Energy window (emin, emax). Only bins overlapping the window are kept.
+        **kwargs
+            Additional parameters (reserved for future use)
+            
+        Returns
+        -------
+        MF34HeatmapData
+            Heatmap data object ready for PlotBuilder.add_heatmap()
+            
+        Examples
+        --------
+        >>> # Simple usage with PlotBuilder
+        >>> from kika.plotting import PlotBuilder
+        >>> heatmap_data = mf34_covmat.to_heatmap_data(
+        ...     nuclide=92235, mt=2, legendre_coeffs=[1, 2, 3]
+        ... )
+        >>> fig = PlotBuilder(style='light').add_heatmap(heatmap_data)
+        >>> fig.show()
+        
+        >>> # Can also use string symbols
+        >>> heatmap_data = mf34_covmat.to_heatmap_data(
+        ...     nuclide='U235', mt=2, legendre_coeffs=1, matrix_type='cov'
+        ... )
+        """
+        from kika.plotting.plot_data import MF34HeatmapData
+        from kika._utils import zaid_to_symbol, symbol_to_zaid
+        
+        # Convert nuclide to isotope (ZAID) if string
+        if isinstance(nuclide, str):
+            isotope = symbol_to_zaid(nuclide)
+        else:
+            isotope = nuclide
+        
+        # Normalize matrix_type parameter
+        matrix_type_normalized = matrix_type.lower()
+        if matrix_type_normalized in ("corr", "correlation"):
+            matrix_type_normalized = "corr"
+        elif matrix_type_normalized in ("cov", "covariance"):
+            matrix_type_normalized = "cov"
+        else:
+            raise ValueError(
+                f"matrix_type must be 'corr'/'correlation' or 'cov'/'covariance', got '{matrix_type}'"
+            )
+        
+        # Normalize scale parameter
+        scale_normalized = scale.lower()
+        if scale_normalized in ("log", "logarithmic"):
+            scale_normalized = "log"
+        elif scale_normalized in ("lin", "linear"):
+            scale_normalized = "linear"
+        else:
+            raise ValueError(
+                f"scale must be 'log'/'logarithmic' or 'lin'/'linear', got '{scale}'"
+            )
+
+        def _transform_edges(edges: np.ndarray) -> np.ndarray:
+            if scale_normalized == "log":
+                safe = np.maximum(edges, 1e-300)
+                return np.log10(safe.astype(float))
+            return edges.astype(float)
+
+        def _crop_edges(edges: np.ndarray) -> np.ndarray:
+            if energy_range is None:
+                return edges
+            emin, emax = energy_range
+            if not (np.isfinite(emin) and np.isfinite(emax)) or emin >= emax:
+                raise ValueError("energy_range must be a tuple (emin, emax) with emin < emax.")
+            keep_mask = (edges[1:] > float(emin)) & (edges[:-1] < float(emax))
+            if not np.any(keep_mask):
+                raise ValueError("energy_range removed all groups; nothing to plot.")
+            first, last = np.where(keep_mask)[0][[0, -1]]
+            return edges[first:last + 2]
+
+        # 1. Filter by isotope and MT
+        filtered_mf34 = self.filter_by_isotope_reaction(isotope, mt)
+        
+        if filtered_mf34.num_matrices == 0:
+            raise ValueError(f"No matrices found for isotope {isotope}, MT {mt}")
+        
+        # Get all available Legendre coefficients for this isotope/MT
+        all_triplets = filtered_mf34._get_param_triplets()
+        available_legendre = sorted(list(set(t[2] for t in all_triplets if t[0] == isotope and t[1] == mt)))
+        
+        if not available_legendre:
+            raise ValueError(f"No Legendre coefficients found for isotope {isotope}, MT {mt}")
+        
+        # 2. Parse legendre_coeffs input
+        if isinstance(legendre_coeffs, tuple) and len(legendre_coeffs) == 2:
+            # Off-diagonal block
+            is_diagonal = False
+            row_l, col_l = legendre_coeffs
+            legendre_list = [row_l, col_l]
+        elif isinstance(legendre_coeffs, int):
+            # Single L diagonal block
+            is_diagonal = True
+            legendre_list = [legendre_coeffs]
+        else:
+            # Multiple L diagonal blocks
+            is_diagonal = True
+            legendre_list = sorted(list(legendre_coeffs))
+            # Fallback to all available if empty list (same behavior as old implementation)
+            if not legendre_list:
+                legendre_list = available_legendre
+        
+        # Validate requested Legendre coefficients
+        for l_val in legendre_list:
+            if l_val not in available_legendre:
+                raise ValueError(f"Legendre coefficient L={l_val} not available for isotope {isotope}, MT {mt}. "
+                               f"Available: {available_legendre}")
+        
+        # 3. Build (cropped) union grids so matrix geometry matches plotting geometry
+        union_grids_full = filtered_mf34.compute_union_energy_grids()
+        union_grids_cropped = {t: _crop_edges(np.asarray(g, dtype=float)) for t, g in union_grids_full.items()}
+        filtered_mf34._union_grids = union_grids_cropped
+
+        triplets = filtered_mf34._get_param_triplets()
+        triplet_index = {t: i for i, t in enumerate(triplets)}
+        G_map = {t: len(union_grids_cropped[t]) - 1 for t in triplets}
+        max_G = max(G_map.values()) if G_map else 0
+
+        # 4. Extract matrix with applied energy cropping
+        # Always get correlation matrix to use its NaN mask for identifying "no-data" regions
+        corr_matrix_all = filtered_mf34.clipped_correlation_matrix
+        
+        if matrix_type_normalized == 'corr':
+            matrix_full_all = corr_matrix_all
+            mask_value = 0.0
+        else:  # 'cov'
+            cov_matrix_all = filtered_mf34.covariance_matrix
+            # Apply NaN mask from correlation matrix to covariance matrix
+            # Where correlation is NaN (no data), covariance should also be NaN
+            cov_matrix_all = cov_matrix_all.copy()
+            cov_matrix_all[~np.isfinite(corr_matrix_all)] = np.nan
+            matrix_full_all = cov_matrix_all
+            # Use mask_value=0.0 for covariance too: zero covariance in off-diagonal
+            # regions indicates no data from the lifting operation
+            mask_value = 0.0
+
+        # 5. Select rows/cols for requested Legendre coefficients
+        energy_grids_dict: Dict[int, np.ndarray] = {}
+        G_per_L: Dict[int, int] = {}
+        ranges_dict: Dict[int, Tuple[int, int]] = {}
+        energy_ranges: Dict[int, Tuple[float, float]] = {}
+        edges_transformed_map: Dict[int, np.ndarray] = {}
+
+        def _get_triplet_for_L(L: int) -> Tuple[int, int, int]:
+            for t in triplets:
+                if t[2] == L:
+                    return t
+            raise ValueError(f"Legendre coefficient L={L} not available after filtering for isotope {isotope}, MT {mt}.")
+
+        if is_diagonal:
+            selected_indices: List[int] = []
+            for l_val in legendre_list:
+                t = _get_triplet_for_L(l_val)
+                g_len = G_map.get(t, 0)
+                if g_len <= 0:
+                    continue
+                block_start = triplet_index[t] * max_G
+                selected_indices.extend(range(block_start, block_start + g_len))
+                G_per_L[l_val] = g_len
+                energy_grids_dict[l_val] = union_grids_cropped[t]
+
+            # Slice matrix to selected coefficients only (preserving requested order)
+            matrix_full = matrix_full_all[np.ix_(selected_indices, selected_indices)]
+
+            # Recompute contiguous ranges in the sliced matrix
+            current_pos = 0
+            x_edges_parts = []
+            for i, l_val in enumerate(legendre_list):
+                g_len = G_per_L.get(l_val, 0)
+                ranges_dict[l_val] = (current_pos, current_pos + g_len)
+                raw_edges = energy_grids_dict.get(l_val)
+                if raw_edges is not None and raw_edges.size > 0:
+                    transformed = _transform_edges(raw_edges)
+                    # Start each block at the previous block's end to keep global coords
+                    offset = x_edges_parts[-1][-1] if x_edges_parts else 0.0
+                    edges_global = (transformed - transformed[0]) + offset
+                    edges_transformed_map[l_val] = edges_global
+                    energy_ranges[l_val] = (edges_global[0], edges_global[-1])
+                    if i == 0:
+                        x_edges_parts.append(edges_global)
+                    else:
+                        x_edges_parts.append(edges_global[1:])
+                    current_pos += g_len
+                else:
+                    energy_ranges[l_val] = (current_pos, current_pos + g_len)
+                    current_pos += g_len
+
+            x_edges = np.concatenate(x_edges_parts) if x_edges_parts else None
+            y_edges = x_edges.copy() if x_edges is not None else None
+        else:
+            row_l, col_l = legendre_list
+            row_triplet = _get_triplet_for_L(row_l)
+            col_triplet = _get_triplet_for_L(col_l)
+            G_row = G_map.get(row_triplet, 0)
+            G_col = G_map.get(col_triplet, 0)
+
+            row_indices = list(range(triplet_index[row_triplet] * max_G, triplet_index[row_triplet] * max_G + G_row))
+            col_indices = list(range(triplet_index[col_triplet] * max_G, triplet_index[col_triplet] * max_G + G_col))
+
+            matrix_full = matrix_full_all[np.ix_(row_indices, col_indices)]
+
+            energy_grids_dict[row_l] = union_grids_cropped[row_triplet]
+            energy_grids_dict[col_l] = union_grids_cropped[col_triplet]
+            G_per_L[row_l] = G_row
+            G_per_L[col_l] = G_col
+            ranges_dict[row_l] = (0, G_row)
+            ranges_dict[col_l] = (0, G_col)
+
+            y_edges = None
+            if energy_grids_dict[row_l].size > 0:
+                y_edges = _transform_edges(energy_grids_dict[row_l])
+                y_edges = y_edges - y_edges[0]
+                edges_transformed_map[row_l] = y_edges
+                energy_ranges[row_l] = (y_edges[0], y_edges[-1])
+
+            x_edges = None
+            if energy_grids_dict[col_l].size > 0:
+                x_edges = _transform_edges(energy_grids_dict[col_l])
+                x_edges = x_edges - x_edges[0]
+                edges_transformed_map[col_l] = x_edges
+                energy_ranges[col_l] = (x_edges[0], x_edges[-1])
+
+        extent = None
+        if x_edges is not None and y_edges is not None:
+            extent = (float(x_edges[0]), float(x_edges[-1]), float(y_edges[0]), float(y_edges[-1]))
+
+        block_info = {
+            'legendre_coeffs': legendre_list,
+            'G_per_L': G_per_L,
+            'ranges': ranges_dict,
+            'energy_ranges': energy_ranges,
+            'edges_transformed': edges_transformed_map,
+        }
+
+        # 6. Compute uncertainties (rendering controlled at plot time)
+        uncertainty_data = {}
+        cov_full = filtered_mf34.covariance_matrix
+        for l_val in legendre_list:
+            t = _get_triplet_for_L(l_val)
+            g_len = G_map.get(t, 0)
+            if g_len <= 0:
+                continue
+            base = triplet_index[t] * max_G
+            diag_variance = np.diag(cov_full[base: base + g_len, base: base + g_len])
+            with np.errstate(divide='ignore', invalid='ignore'):
+                sigma_percent = np.sqrt(np.abs(diag_variance)) * 100
+                sigma_percent = np.nan_to_num(sigma_percent, nan=0.0, posinf=0.0, neginf=0.0)
+            uncertainty_data[l_val] = sigma_percent
+        if not uncertainty_data:
+            uncertainty_data = None
+
+        # 6. Generate label
+        isotope_symbol = zaid_to_symbol(isotope)
+        matrix_type_label = "Covariance" if matrix_type_normalized == "cov" else "Correlation"
+        if is_diagonal:
+            if len(legendre_list) == 1:
+                label = f"{isotope_symbol} MT:{mt} L={legendre_list[0]} {matrix_type_label}"
+            else:
+                label = f"{isotope_symbol} MT:{mt} Angular Distribution {matrix_type_label}"
+        else:
+            label = f"{isotope_symbol} MT:{mt} L={legendre_list[0]} vs L={legendre_list[1]} {matrix_type_label}"
+        
+        # 7. Create and return MF34HeatmapData
+        heatmap_data = MF34HeatmapData(
+            matrix_data=matrix_full,
+            isotope=isotope,
+            mt=mt,
+            legendre_coeffs=legendre_list,
+            matrix_type=matrix_type_normalized,
+            scale=scale_normalized,
+            extent=extent,
+            x_edges=x_edges,
+            y_edges=y_edges,
+            block_info=block_info,
+            uncertainty_data=uncertainty_data,
+            energy_grids=energy_grids_dict,
+            is_diagonal=is_diagonal,
+            mask_value=mask_value,
+            label=label
+        )
+        for key, val in kwargs.items():
+            if key == "mask_color":
+                continue  # mask color is fixed to lightgray
+            if hasattr(heatmap_data, key):
+                setattr(heatmap_data, key, val)
+            else:
+                heatmap_data.metadata[key] = val
+        return heatmap_data
+    
     def plot_covariance_heatmap(
         self,
-        isotope: int,
+        nuclide: Union[int, str],
         mt: int,
         legendre_coeffs: Union[int, List[int], Tuple[int, int]],
         ax: Optional['plt.Axes'] = None,
         *,
         matrix_type: str = "corr",
-        style: str = "default",
         figsize: Tuple[float, float] = (6, 6),
         dpi: int = 300,
         font_family: str = "serif",
@@ -331,15 +771,20 @@ class MF34CovMat:
         vmin: Optional[float] = None,
         show_uncertainties: bool = False,
         cmap: Optional[any] = None,
+        scale: str = "log",
+        energy_range: Optional[Tuple[float, float]] = None,
+        title: Optional[str] = "default",
         **imshow_kwargs,
     ) -> 'plt.Figure':
         """
-        Draw a covariance or correlation matrix heat-map for MF34 angular distribution data.
+        Draw a covariance or correlation matrix heatmap for MF34 angular distribution data.
 
         Parameters
         ----------
-        isotope : int
-            Isotope ID
+        nuclide : int or str
+            Isotope identifier. Can be either:
+            - Integer ZAID (e.g., 92235 for U-235)
+            - Element-mass string (e.g., 'U235', 'Fe56')
         mt : int
             Reaction MT number
         legendre_coeffs : int, list of int, or tuple of (row_l, col_l)
@@ -348,11 +793,10 @@ class MF34CovMat:
             - List of ints: diagonal blocks for those L values
             - Tuple of (row_l, col_l): off-diagonal block between row and column L
         ax : plt.Axes, optional
-            Matplotlib axes to draw into (only used when show_uncertainties=False)
-        matrix_type : str
-            Type of matrix to plot: "cov" for covariance (uses linear scale) or "corr" for correlation
-        style : str
-            Plot style: 'default', 'dark', 'paper', 'publication', 'presentation'
+            Matplotlib axes to draw into (deprecated, only used when show_uncertainties=False)
+        matrix_type : str, default "corr"
+            Type of matrix to plot: "corr"/"correlation" for correlation matrix,
+            or "cov"/"covariance" for covariance matrix
         figsize : tuple
             Figure size in inches (width, height)
         dpi : int
@@ -368,24 +812,29 @@ class MF34CovMat:
             colormap (e.g., 'viridis', 'plasma', 'RdYlBu', 'coolwarm') or a matplotlib 
             Colormap object. If None, defaults to 'RdYlGn' for correlation matrices 
             and 'viridis' for covariance matrices.
+        scale : str, default "log"
+            Energy axis scale: "log"/"logarithmic" or "lin"/"linear"
+        energy_range : tuple of float, optional
+            Energy range (min, max) for filtering. Values in eV.
+        title : str or None, default "default"
+            Plot title. If "default", auto-generates from nuclide, MT, and Legendre coefficient.
+            If a string, uses that as the title. If None, suppresses the title.
         **imshow_kwargs
-            Additional arguments passed to imshow
+            Additional arguments passed to imshow (deprecated)
 
         Returns
         -------
         plt.Figure
             The matplotlib figure containing the heatmap and optional uncertainty plots
         """
-        from kika.cov.mf34cov_heatmap import plot_mf34_covariance_heatmap
+        from kika.plotting.covariance import plot_mf34_covariance_heatmap as _plot_new
 
-        return plot_mf34_covariance_heatmap(
+        return _plot_new(
             mf34_covmat=self,
-            isotope=isotope,
+            nuclide=nuclide,
             mt=mt,
             legendre_coeffs=legendre_coeffs,
-            ax=ax,
             matrix_type=matrix_type,
-            style=style,
             figsize=figsize,
             dpi=dpi,
             font_family=font_family,
@@ -393,7 +842,9 @@ class MF34CovMat:
             vmin=vmin,
             show_uncertainties=show_uncertainties,
             cmap=cmap,
-            **imshow_kwargs
+            energy_range=energy_range,
+            scale=scale,
+            title=title,
         )
 
     def plot_uncertainties(
@@ -467,14 +918,13 @@ class MF34CovMat:
         ...                                     uncertainty_type="absolute")
         >>> fig.show()
         """
-        from kika.cov.mf34cov_heatmap import plot_mf34_uncertainties
+        from kika.cov.mf34cov_heatmap import plot_mf34_uncertainties as _plot_unc
 
-        return plot_mf34_uncertainties(
+        return _plot_unc(
             mf34_covmat=self,
             isotope=isotope,
             mt=mt,
             legendre_coeffs=legendre_coeffs,
-            ax=ax,
             uncertainty_type=uncertainty_type,
             style=style,
             figsize=figsize,
@@ -487,9 +937,10 @@ class MF34CovMat:
 
     def to_plot_data(
         self,
-        isotope: int,
+        nuclide: Union[int, str],
         mt: int,
         order: int,
+        sigma: float = 1.0,
         uncertainty_type: str = 'relative',
         label: str = None,
         **styling_kwargs
@@ -502,23 +953,31 @@ class MF34CovMat:
         
         Parameters
         ----------
-        isotope : int
-            Isotope ID
+        nuclide : int or str
+            Isotope identifier. Can be either:
+            - Integer ZAID (e.g., 92235 for U-235)
+            - Element-mass string (e.g., 'U235', 'Fe56')
         mt : int
             Reaction MT number
         order : int
             Legendre polynomial order
+        sigma : float, default 1.0
+            Sigma level for uncertainty scaling (e.g., 1.0 for 1σ, 2.0 for 2σ)
         uncertainty_type : str, default 'relative'
             Type of uncertainty: 'relative' (%) or 'absolute'
         label : str, optional
             Custom label for the plot. If None, auto-generates from isotope and order.
+            Note: Energy values are returned in eV (native ENDF-6 format) to ensure
+            compatibility when combining with MF4 data.
         **styling_kwargs
             Additional styling kwargs (color, linestyle, linewidth, etc.)
             
         Returns
         -------
-        LegendreUncertaintyPlotData
-            Plot data object ready to be added to a PlotBuilder
+        tuple of (None, LegendreUncertaintyPlotData)
+            Tuple containing:
+            - None: MF34 does not contain Legendre coefficient values (only uncertainties)
+            - unc_data: Uncertainty data for the Legendre coefficients
             
         Raises
         ------
@@ -527,16 +986,23 @@ class MF34CovMat:
             
         Examples
         --------
-        >>> # Extract uncertainty data from MF34CovMat
+        >>> # Extract uncertainty data from MF34CovMat - both notation styles work
         >>> mf34_covmat = endf.mf[34].mt[2].to_ang_covmat()
-        >>> unc_data = mf34_covmat.to_plot_data(isotope=26056, mt=2, order=1)
+        >>> coeff_data, unc_data = mf34_covmat.to_plot_data(nuclide=26056, mt=2, order=1)
+        >>> # Note: coeff_data will be None (MF34 only has uncertainties, not values)
         >>> 
-        >>> # Build a plot
+        >>> # Build a plot with just uncertainties
         >>> from kika.plotting import PlotBuilder
         >>> fig = PlotBuilder().add_data(unc_data).build()
         """
         from kika.plotting import LegendreUncertaintyPlotData
-        from kika._utils import zaid_to_symbol
+        from kika._utils import zaid_to_symbol, symbol_to_zaid
+        
+        # Convert nuclide to isotope (ZAID) if string
+        if isinstance(nuclide, str):
+            isotope = symbol_to_zaid(nuclide)
+        else:
+            isotope = nuclide
         
         # Get uncertainty data
         unc_data = self.get_uncertainties_for_legendre_coefficient(isotope, mt, order)
@@ -550,7 +1016,10 @@ class MF34CovMat:
         energies = unc_data['energies']
         uncertainties = unc_data['uncertainties']
         
-        # Get energy bin boundaries
+        # Keep energies in original units (as stored in energy_grids)
+        energies_arr = np.asarray(energies, dtype=float)
+        
+        # Get energy bin boundaries (also in eV)
         energy_bins = None
         for i, (iso_r, mt_r, l_r, iso_c, mt_c, l_c) in enumerate(zip(
             self.isotope_rows, self.reaction_rows, self.l_rows,
@@ -560,42 +1029,50 @@ class MF34CovMat:
             if (iso_r == isotope and iso_c == isotope and 
                 mt_r == mt and mt_c == mt and 
                 l_r == order and l_c == order):
-                energy_bins = np.array(self.energy_grids[i])
+                energy_bins = np.array(self.energy_grids[i], dtype=float)  # Keep in original units
                 break
         
-        # Convert to percentage if relative
+        # Convert to percentage if relative and apply sigma multiplier
         if uncertainty_type.lower() == 'relative':
-            uncertainties = uncertainties * 100.0  # Convert to percentage
+            uncertainties = uncertainties * 100.0 * sigma  # Convert to percentage with sigma
+        else:
+            uncertainties = uncertainties * sigma  # Apply sigma to absolute values
         
         # Generate label if not provided
         if label is None:
             isotope_symbol = zaid_to_symbol(isotope)
+            sigma_str = f"{sigma}σ" if sigma != 1.0 else "σ"
             if uncertainty_type.lower() == 'relative':
-                label = f"{isotope_symbol} MT={mt} L={order} (σ %)"
+                label = f"{isotope_symbol} MT={mt} L={order} ({sigma_str} %)"
             else:
-                label = f"{isotope_symbol} MT={mt} L={order} (σ abs)"
+                label = f"{isotope_symbol} MT={mt} L={order} ({sigma_str} abs)"
         
         # For step plots with histogram data:
         # - energies has N+1 bin boundaries
         # - uncertainties has N values (one per bin)
         # For proper step plotting with where='post', we need to duplicate the last
         # uncertainty value so that the last bin is drawn extending to the last boundary
-        if len(energies) == len(uncertainties) + 1:
+        if len(energies_arr) == len(uncertainties) + 1:
             # Append the last uncertainty value to match the energy boundaries length
             uncertainties = np.append(uncertainties, uncertainties[-1])
         
-        # Create and return PlotData object
-        return LegendreUncertaintyPlotData(
-            x=energies,
+        # Create PlotData object
+        unc_data = LegendreUncertaintyPlotData(
+            x=energies_arr,
             y=uncertainties,
             label=label,
             order=order,
             isotope=zaid_to_symbol(isotope),
             mt=mt,
             uncertainty_type=uncertainty_type,
+            sigma=sigma,
             energy_bins=energy_bins,
             **styling_kwargs
         )
+        
+        # Return tuple for API consistency (None, unc_data)
+        # MF34 does not contain Legendre coefficient values, only uncertainties
+        return None, unc_data
 
     def filter_by_isotope_reaction(self, isotope: int, mt: int) -> "MF34CovMat":
         """
@@ -1104,6 +1581,26 @@ class MF34CovMat:
         return sorted(triplets, key=lambda t: (t[0], t[1], t[2]))
 
     def _lift_matrix(self, src_grid, dst_grid):
+        """
+        Create a lifting matrix to map covariance from source to destination energy grid.
+        
+        Constructs a mapping matrix A such that when applied, it transforms covariance
+        matrices from the source energy grid to the destination (union) energy grid.
+        Assumes destination grid is a subset or refinement of source grid.
+        
+        Parameters
+        ----------
+        src_grid : array-like
+            Source energy grid boundaries (NE points)
+        dst_grid : array-like
+            Destination energy grid boundaries (NE points)
+        
+        Returns
+        -------
+        np.ndarray
+            Lifting matrix of shape (Gd, Gs) where Gs = len(src_grid)-1
+            and Gd = len(dst_grid)-1
+        """
         # src_grid, dst_grid are boundary arrays (NE)
         Gs, Gd = len(src_grid)-1, len(dst_grid)-1
         A = np.zeros((Gd, Gs), dtype=float)

@@ -31,7 +31,8 @@ from kika.ace.xsdir import create_xsdir_files_for_ace
 from kika.sampling.utils import (
     _format_energy_group_name,
     DualLogger, 
-    _get_logger
+    _get_logger,
+    _set_logger
 )
 
 # Import NJOY runner for ACE generation
@@ -215,8 +216,8 @@ def _process_njoy_for_sample(
             os.makedirs(ace_sample_dir, exist_ok=True)
             os.makedirs(njoy_sample_dir, exist_ok=True)
             
-            # Run NJOY with a temporary directory (to avoid library subdirectories)
-            with tempfile.TemporaryDirectory(prefix="njoy_temp_") as temp_dir:
+            # Run NJOY with a temporary directory inside output_dir (to avoid library subdirectories)
+            with tempfile.TemporaryDirectory(prefix="njoy_temp_", dir=output_dir) as temp_dir:
                 result = run_njoy(
                     njoy_exe=njoy_exe,
                     endf_path=out_endf,
@@ -348,13 +349,13 @@ def _log_njoy_batch_results(njoy_results, file_key, file_index, temperatures, su
         summary_data[file_key]['ace_generation']['failed_samples'] = failed_samples
     
     # Log batch summary
-    logger.info(f"[NJOY] File {file_index}: Batch processing complete - {successful_samples}/{total_samples} samples successful")
+    logger.info(f"[NJOY] File {file_index}: Batch processing complete - {successful_samples}/{total_samples} samples successful", console=True)
     
     # Log temperature-specific results
     for temp in temperatures:
         success_count = temp_success_count[temp]
         temp_str = str(temp).rstrip('0').rstrip('.') if '.' in str(temp) else str(temp)
-        logger.info(f"[NJOY] File {file_index}: Temperature {temp_str} - {success_count}/{total_samples} samples successful")
+        logger.info(f"[NJOY] File {file_index}: Temperature {temp_str} - {success_count}/{total_samples} samples successful", console=True)
     
     # Log warnings (if any) - aggregate similar warnings
     if all_warnings:
@@ -576,6 +577,7 @@ def perturb_ENDF_files(
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_file = os.path.join(output_dir, f'endf_perturbation_{timestamp}.log')
     _logger = DualLogger(log_file)
+    _set_logger(_logger)
     
     # Console: Basic start message
     print(f"[INFO] Starting ENDF perturbation job")

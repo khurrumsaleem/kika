@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from kika.serpent.sens import SensitivityFile
-from kika._plot_settings import setup_plot_style, format_axes, finalize_plot
+from kika.plotting.styles import format_axes, setup_plot_style, finalize_plot
 from kika._utils import zaid_to_symbol
 
 
