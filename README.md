@@ -1,12 +1,15 @@
 # KIKA
 
-[![Version](https://img.shields.io/badge/version-0.1.2-blue.svg)](https://github.com/monleon96/kika)
+[![Version](https://img.shields.io/badge/version-0.1.2-blue.svg)](https://github.com/juanmonleon/kika)
 [![Documentation Status](https://readthedocs.org/projects/kika/badge/?version=latest)](https://kika.readthedocs.io/en/latest/?badge=latest)
 [![PyPI](https://img.shields.io/pypi/v/kika-nd)](https://pypi.org/project/kika-nd/)
 [![Python](https://img.shields.io/pypi/pyversions/kika-nd)](https://pypi.org/project/kika-nd/)
-[![License](https://img.shields.io/badge/license-BSD--3--Clause-green.svg)](https://github.com/monleon96/kika/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-green.svg)](https://github.com/juanmonleon/kika/blob/main/LICENSE)
 
 A comprehensive Python toolkit for nuclear data analysis, Monte Carlo simulation support, and uncertainty quantification. KIKA provides tools for working with MCNP, ENDF, ACE files, covariance matrices, and sensitivity analysis.
+
+> **Looking for the desktop application?** KIKA is also available as a standalone GUI — no Python required.
+> Download the latest installer from [**kika-release**](https://github.com/juanmonleon/kika-release).
 
 ## Features
 
@@ -73,17 +76,13 @@ sens_data = kika.compute_sensitivity(
 ace_data = kika.read_ace("path/to/ace_file")
 
 # Read covariance matrices
-cov = kika.read_scale_covmat("path/to/covmat_file")
+cov = kika.read_coverx("path/to/covmat_file")  # text or binary, auto-detected
 ```
 
 ## Documentation
 
 For complete documentation, examples, and API reference, visit:
 [KIKA Documentation](https://kika.readthedocs.io/en/latest/)
-
-## GUI Application
-
-A standalone GUI application for KIKA is available at [kika-app](https://github.com/monleon96/kika-app).
 
 ## Contributing
 
